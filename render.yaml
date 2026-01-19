@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: api-planilha
+    env: python
+    region: frankfurt   # ou sao-paulo se preferir
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python app.py"
+    envVars:
+      - key: PORT
+        value: 10000
