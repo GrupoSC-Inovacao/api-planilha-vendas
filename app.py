@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 import pandas as pd
 import os
 
@@ -14,6 +14,8 @@ def ler_produtos():
         return jsonify(df.to_dict(orient='records'))
     except Exception as e:
         return jsonify({"erro": "Falha ao ler planilha de produtos"}), 500
+
+#############################################################################
 
 @app.route('/clientes', methods=['POST'])
 def buscar_cliente():
@@ -48,6 +50,17 @@ def buscar_cliente():
     except Exception as e:
         return jsonify({"erro": "Falha ao buscar cliente"}), 500
 
+#############################################################################
+
+@app.route('/imagens/<nome>')
+def servir_imagem(nome):
+    if '..' in nome or nome.startswith('/'):
+        return jsonify({"erro": "Acesso negado"}), 403
+    return send_from_directory('.', nome)
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
+    
+    
+    
