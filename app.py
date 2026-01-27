@@ -53,14 +53,41 @@ def buscar_cliente():
 #############################################################################
 
 @app.route('/imagens/<nome>')
-def servir_imagem(nome):
+def listar_imagens_por_nome(nome):
     if '..' in nome or nome.startswith('/'):
         return jsonify({"erro": "Acesso negado"}), 403
-    return send_from_directory('.', nome)
+
+    pasta = '.'
+    extensoes_validas = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
+    arquivos_encontrados = []
+
+    try:
+        for arquivo in os.listdir(pasta):
+            caminho_completo = os.path.join(pasta, arquivo)
+            if not os.path.isfile(caminho_completo):
+                continue
+            nome_arquivo, ext = os.path.splitext(arquivo)
+            if ext.lower() not in extensoes_validas:
+                continue
+            if nome_arquivo.lower().startswith(nome.lower()):
+                url = f"/imagens-arquivo/{arquivo}"
+                arquivos_encontrados.append(url)
+    except Exception:
+        return jsonify({"erro": "Falha ao listar imagens"}), 500
+
+    return jsonify({"imagens": arquivos_encontrados})
+
+@app.route('/imagens-arquivo/<nome>')
+def servir_arquivo_imagem(nome):
+    if '..' in nome or nome.startswith('/'):
+        return jsonify({"erro": "Acesso negado"}), 403
+    try:
+        return send_from_directory('.', nome)
+    except FileNotFoundError:
+        return jsonify({"erro": "Imagem não encontrada"}), 404
+
+#############################################################################
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
-    
-    
-    
