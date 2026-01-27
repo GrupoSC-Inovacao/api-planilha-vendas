@@ -57,6 +57,7 @@ def listar_imagens_por_nome(nome):
     if '..' in nome or nome.startswith('/'):
         return jsonify({"erro": "Acesso negado"}), 403
 
+    base_url = request.url_root.rstrip('/')
     pasta = '.'
     extensoes_validas = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
     arquivos_encontrados = []
@@ -70,8 +71,8 @@ def listar_imagens_por_nome(nome):
             if ext.lower() not in extensoes_validas:
                 continue
             if nome_arquivo.lower().startswith(nome.lower()):
-                url = f"/imagens-arquivo/{arquivo}"
-                arquivos_encontrados.append(url)
+                url_completa = f"{base_url}/imagens-arquivo/{arquivo}"
+                arquivos_encontrados.append(url_completa)
     except Exception:
         return jsonify({"erro": "Falha ao listar imagens"}), 500
 
