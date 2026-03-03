@@ -4,6 +4,8 @@ import os
 
 app = Flask(__name__)
 
+#############################################################################
+
 @app.route('/catalogo', methods=['GET'])
 def ler_produtos():
     caminho = 'catalogo.xlsx'
@@ -87,6 +89,89 @@ def servir_arquivo_imagem(nome):
     except FileNotFoundError:
         return jsonify({"erro": "Imagem não encontrada"}), 404
 
+#############################################################################
+
+@app.route('/auth/consultar', methods=['POST'])
+def consultar_auth():
+    caminho = 'auth.xlsx'
+    if not os.path.exists(caminho):
+        return jsonify({"erro": "Arquivo auth.xlsx não encontrado"}), 404
+
+    try:
+        dados = request.get_json()
+        if not dados:
+            return jsonify({"erro": "Corpo da requisição inválido"}), 400
+
+        number = str(dados.get("number", "")).strip()
+
+        if not number:
+            return jsonify({"erro": "number é obrigatório"}), 400
+        
+        df = pd.read_excel(caminho, dtype={'number': str})
+                
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+                
+        data_atual = datetime.now().date()
+              
+        resultado = df[
+            (df['number'].str.strip() == number) &
+            (df['date'].dt.date == data_atual)
+        ]
+
+        if resultado.empty:
+            return jsonify({"mensagem": "dados nao encontrados"}), 404
+    
+        registro = resultado.iloc[0].to_dict()
+        
+        if 'date' in registro and pd.notna(registro['date']):
+            registro['date'] = registro['date'].strftime('%Y-%m-%d')
+        
+        return jsonify(registro), 200
+
+    except Exception as e:
+        print(f"Erro na autenticação: {e}")
+        return jsonify({"erro": "Falha ao autenticar"}), 500
+    
+#############################################################################
+
+@app.route('/auth', methods=['POST'])
+def salvar_auth():
+    caminho = 'auth.xlsx'
+    
+    try:
+        dados = request.get_json()
+        if not dados:
+            return jsonify({"erro": "Corpo da requisição inválido"}), 400
+        
+        number = str(dados.get("number", "")).strip()
+        session = str(dados.get("session", "")).strip()
+        auth = str(dados.get("auth", "")).strip()
+        date = str(dados.get("date", "")).strip()
+        
+        if not number or not session or not auth or not date:
+            return jsonify({"erro": "Todos os campos são obrigatórios: number, session, auth, date"}), 400
+        
+        novo_registro = {
+            'number': number,
+            'session': session,
+            'auth': auth,
+            'date': date
+        }
+          
+        if os.path.exists(caminho):
+            df = pd.read_excel(caminho)
+            df = pd.concat([df, pd.DataFrame([novo_registro])], ignore_index=True)
+        else:
+            df = pd.DataFrame([novo_registro])
+        
+        df.to_excel(caminho, index=False)
+        
+        return jsonify({"mensagem": "Dados salvos com sucesso", "dados": novo_registro}), 201
+
+    except Exception as e:
+        print(f"Erro ao salvar auth: {e}")
+        return jsonify({"erro": "Falha ao salvar dados"}), 500
+    
 #############################################################################
 
 if __name__ == '__main__':
