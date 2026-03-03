@@ -11,7 +11,7 @@ app = Flask(__name__)
 def ler_produtos():
     caminho = 'catalogo.xlsx'
     if not os.path.exists(caminho):
-        return jsonify({"erro": "Arquivo catalogo.xlsx não encontrado"}), 201
+        return jsonify({"erro": "Arquivo catalogo.xlsx não encontrado"}), 404
     try:
         df = pd.read_excel(caminho)
         return jsonify(df.to_dict(orient='records'))
@@ -24,7 +24,7 @@ def ler_produtos():
 def buscar_cliente():
     caminho = 'clientes.xlsx'
     if not os.path.exists(caminho):
-        return jsonify({"erro": "Arquivo clientes.xlsx não encontrado"}), 201
+        return jsonify({"erro": "Arquivo clientes.xlsx não encontrado"}), 404
 
     try:
         dados = request.get_json()
@@ -96,7 +96,7 @@ def servir_arquivo_imagem(nome):
 def consultar_auth():
     caminho = 'auth.xlsx'
     if not os.path.exists(caminho):
-        return jsonify({"erro": "Arquivo auth.xlsx não encontrado"}), 201
+        return jsonify({"erro": "Arquivo auth.xlsx não encontrado"}), 404
 
     try:
         dados = request.get_json()
@@ -116,6 +116,7 @@ def consultar_auth():
         
         resultado = df[
             (df['number'].str.strip() == number) &
+            (df['date'].notna()) &
             (df['date'].dt.date == data_atual)
         ]
 
@@ -160,14 +161,26 @@ def salvar_auth():
         }
         
         if os.path.exists(caminho):
-            df = pd.read_excel(caminho)
-            df = pd.concat([df, pd.DataFrame([novo_registro])], ignore_index=True)
+            df = pd.read_excel(caminho, dtype={'number': str})
+            
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            data_registro = pd.to_datetime(date, errors='coerce')
+            
+            mask = (df['number'].str.strip() == number) & (df['date'].dt.date == data_registro.date())
+            
+            if mask.any():
+                df.loc[mask, 'auth'] = auth
+                df.loc[mask, 'session'] = session
+                df.to_excel(caminho, index=False)
+                return jsonify({"mensagem": "Registro atualizado com sucesso", "dados": novo_registro}), 200
+            else:
+                df = pd.concat([df, pd.DataFrame([novo_registro])], ignore_index=True)
+                df.to_excel(caminho, index=False)
+                return jsonify({"mensagem": "Dados salvos com sucesso", "dados": novo_registro}), 201
         else:
             df = pd.DataFrame([novo_registro])
-        
-        df.to_excel(caminho, index=False)
-        
-        return jsonify({"mensagem": "Dados salvos com sucesso", "dados": novo_registro}), 201
+            df.to_excel(caminho, index=False)
+            return jsonify({"mensagem": "Dados salvos com sucesso", "dados": novo_registro}), 201
 
     except Exception as e:
         print(f"Erro ao salvar auth: {e}")
@@ -175,8 +188,47 @@ def salvar_auth():
 
 #############################################################################
 
+@app.route('/desativar', methods=['POST'])
+def desativar_auth():
+    caminho = 'auth.xlsx'
+    if not os.path.exists(caminho):
+        return jsonify({"erro": "Arquivo auth.xlsx não encontrado"}), 404
+
+    try:
+        dados = request.get_json()
+        if not dados:
+            return jsonify({"erro": "Corpo da requisição inválido"}), 400
+
+        number = str(dados.get("number", "")).strip()
+
+        if not number:
+            return jsonify({"erro": "number é obrigatório"}), 400
+
+        df = pd.read_excel(caminho, dtype={'number': str})
+        
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        
+        data_atual = datetime.now().date()
+        
+        mask = (df['number'].str.strip() == number) & (df['date'].dt.date == data_atual)
+        
+        if not mask.any():
+            return jsonify({"mensagem": "dados nao encontrados"}), 201
+        
+        df.loc[mask, 'auth'] = 'false'
+        
+        df.to_excel(caminho, index=False)
+        
+        return jsonify({"mensagem": "Auth desativado com sucesso"}), 200
+
+    except Exception as e:
+        print(f"Erro ao desativar auth: {e}")
+        return jsonify({"erro": "Falha ao desativar auth"}), 500
+
+#############################################################################
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
     
-#############################################################################
+    
