@@ -146,16 +146,14 @@ def salvar_auth():
             return jsonify({"erro": "Corpo da requisição inválido"}), 400
         
         number = str(dados.get("number", "")).strip()
-        session = str(dados.get("session", "")).strip()
         auth = str(dados.get("auth", "")).strip()
         date = str(dados.get("date", "")).strip()
         
-        if not number or not session or not auth or not date:
-            return jsonify({"erro": "Todos os campos são obrigatórios: number, session, auth, date"}), 400
+        if not number or not auth or not date:
+            return jsonify({"erro": "Todos os campos são obrigatórios: number, auth, date"}), 400
         
         novo_registro = {
             'number': number,
-            'session': session,
             'auth': auth,
             'date': date
         }
@@ -170,7 +168,6 @@ def salvar_auth():
             
             if mask.any():
                 df.loc[mask, 'auth'] = auth
-                df.loc[mask, 'session'] = session
                 df.to_excel(caminho, index=False)
                 return jsonify({"mensagem": "Registro atualizado com sucesso", "dados": novo_registro}), 200
             else:
