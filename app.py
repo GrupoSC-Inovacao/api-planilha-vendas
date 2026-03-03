@@ -11,7 +11,7 @@ app = Flask(__name__)
 def ler_produtos():
     caminho = 'catalogo.xlsx'
     if not os.path.exists(caminho):
-        return jsonify({"erro": "Arquivo catalogo.xlsx não encontrado"}), 404
+        return jsonify({"erro": "Arquivo catalogo.xlsx não encontrado"}), 201
     try:
         df = pd.read_excel(caminho)
         return jsonify(df.to_dict(orient='records'))
@@ -24,7 +24,7 @@ def ler_produtos():
 def buscar_cliente():
     caminho = 'clientes.xlsx'
     if not os.path.exists(caminho):
-        return jsonify({"erro": "Arquivo clientes.xlsx não encontrado"}), 404
+        return jsonify({"erro": "Arquivo clientes.xlsx não encontrado"}), 201
 
     try:
         dados = request.get_json()
@@ -88,7 +88,7 @@ def servir_arquivo_imagem(nome):
     try:
         return send_from_directory('.', nome)
     except FileNotFoundError:
-        return jsonify({"erro": "Imagem não encontrada"}), 404
+        return jsonify({"erro": "Imagem não encontrada"}), 201
 
 #############################################################################
 
@@ -96,7 +96,7 @@ def servir_arquivo_imagem(nome):
 def consultar_auth():
     caminho = 'auth.xlsx'
     if not os.path.exists(caminho):
-        return jsonify({"erro": "Arquivo auth.xlsx não encontrado"}), 404
+        return jsonify({"erro": "Arquivo auth.xlsx não encontrado"}), 201
 
     try:
         dados = request.get_json()
@@ -120,7 +120,7 @@ def consultar_auth():
         ]
 
         if resultado.empty:
-            return jsonify({"mensagem": "dados nao encontrados"}), 404
+            return jsonify({"mensagem": "dados nao encontrados"}), 201
 
         registro = resultado.iloc[0].to_dict()
         
