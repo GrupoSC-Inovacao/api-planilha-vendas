@@ -3,6 +3,7 @@
 # =============================================================================
 from flask import Flask, jsonify, request, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.dialects.postgresql import psycopg
 from datetime import datetime
 from decimal import Decimal
 import os
