@@ -2,9 +2,12 @@ services:
   - type: web
     name: api-planilha
     env: python
-    region: frankfurt   # ou sao-paulo se preferir
+    region: frankfurt
+    pythonVersion: "3.11"
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python app.py"
     envVars:
       - key: PORT
         value: 10000
+      - key: DATABASE_URL 
+        sync: false  
