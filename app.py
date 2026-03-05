@@ -205,7 +205,9 @@ class Auth(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     number = db.Column(db.String(20), nullable=False)
-    auth = db.Column(db.String(10), default='false')
+    auth = db.Column(db.String(10), default='false')   
+    cnpj = db.Column(db.String(20))
+    empresa = db.Column(db.String(255))
     date = db.Column(db.Date, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
@@ -217,7 +219,9 @@ class Auth(db.Model):
         return {
             'number': self.number,
             'auth': self.auth,
-            'date': self.date.strftime('%Y-%m-%d') if self.date else None
+            'cnpj': self.cnpj,
+            'empresa': self.empresa,
+            'date': self.date.strftime('%Y-%m-%d') if self.date else None            
         }
 
 # =============================================================================
@@ -609,7 +613,7 @@ def salvar_auth():
     """
     Salva nova autenticação ou atualiza existente (mesmo number + data).
     
-    Body: {"number": "5511910589650", "auth": "true", "date": "2026-03-03"}
+    Body: {"number": "5511910589650", "auth": "true", "date": "2026-03-03", "cnpj": "33456789000132", "empresa": "SC01"}
     """
     try:
         dados = request.get_json()
@@ -618,10 +622,12 @@ def salvar_auth():
         
         number = str(dados.get("number", "")).strip()
         auth = str(dados.get("auth", "")).strip()
-        date_str = str(dados.get("date", "")).strip()
+        cnpj = str(dados.get("cnpj", "")).strip()
+        empresa = str(dados.get("empresa", "")).strip()
+        date_str = str(dados.get("date", "")).strip()        
         
         if not number or not auth or not date_str:
-            return jsonify({"erro": "Todos os campos são obrigatórios: number, auth, date"}), 400
+            return jsonify({"erro": "Todos os campos são obrigatórios: number, auth, cnpj,empresa, date"}), 400
         
         # Converte string "YYYY-MM-DD" para objeto date do Python
         try:
@@ -631,7 +637,9 @@ def salvar_auth():
         
         novo_registro = {
             'number': number,
-            'auth': auth,
+            'auth': auth,            
+            'cnpj': cnpj,
+            'empresa': empresa,
             'date': date_str
         }
         
@@ -641,11 +649,13 @@ def salvar_auth():
         if registro:
             # ATUALIZA registro existente
             registro.auth = auth
+            registro.cnpj = cnpj
+            registro.empresa = empresa
             db.session.commit()
             return jsonify({"mensagem": "Registro atualizado com sucesso", "dados": novo_registro}), 200
         else:
             # CRIA novo registro
-            novo = Auth(number=number, auth=auth, date=date_obj)
+            novo = Auth(number=number, auth=auth, cnpj=cnpj, empresa=empresa, date=date_obj)
             db.session.add(novo)
             db.session.commit()
             return jsonify({"mensagem": "Dados salvos com sucesso", "dados": novo_registro}), 201
@@ -692,6 +702,47 @@ def desativar_auth():
         print(f"Erro ao desativar auth: {e}")
         db.session.rollback()
         return jsonify({"erro": "Falha ao desativar auth"}), 500
+
+# -----------------------------------------------------------------------------
+# POST /dados/cliente - BUSCAR CLIENTE POR TELEFONE (NA TABELA AUTH)
+# -----------------------------------------------------------------------------
+@app.route('/dados/cliente', methods=['POST'])
+def buscar_cliente_por_telefone():
+    """
+    Busca o CNPJ e EMPRESA de um cliente pelo número de telefone na tabela auth.
+    
+    Body: {"number": "5511910589650"}
+    Retorna: {"cnpj": "...", "empresa": "..."} ou erro
+    """
+    try:
+        dados = request.get_json()
+        if not dados:
+            return jsonify({"erro": "Corpo da requisição inválido"}), 400
+
+        # Pega e limpa o número recebido
+        number = str(dados.get("number", "")).strip().replace(" ", "")
+
+        if not number:
+            return jsonify({"erro": "number é obrigatório"}), 400
+
+        # Busca na tabela auth pelo número (traz o registro mais recente)
+        registro = Auth.query.filter_by(number=number).order_by(Auth.created_at.desc()).first()
+
+        if registro and registro.cnpj and registro.empresa:
+            # Encontrou: Retorna CNPJ e EMPRESA
+            return jsonify({
+                "cnpj": registro.cnpj,
+                "empresa": registro.empresa,
+                "number": registro.number,
+                "mensagem": "Cliente encontrado"
+            }), 200
+
+        # Não encontrou ou não tem CNPJ/EMPRESA cadastrado
+        return jsonify({"mensagem": "dados nao encontrados"}), 201
+
+    except Exception as e:
+        print(f"Erro ao buscar cliente por telefone: {e}")
+        return jsonify({"erro": "Falha ao buscar cliente"}), 500
 
 # =============================================================================
 # INICIALIZAÇÃO DO BANCO DE DADOS
