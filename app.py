@@ -8,6 +8,17 @@ from datetime import datetime
 from decimal import Decimal
 import os
 
+import logging
+import sys
+
+# Configurar logging para mostrar erros no console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
+
 # =============================================================================
 # INICIALIZAÇÃO DO FLASK
 # =============================================================================
@@ -681,12 +692,35 @@ def desativar_auth():
 # =============================================================================
 # INICIALIZAÇÃO DO BANCO DE DADOS
 # =============================================================================
-with app.app_context():
-    db.create_all()
+
+# Criar tabelas se não existirem (com tratamento de erro)
+try:
+    with app.app_context():
+        print("🔵 Iniciando conexão com o banco...")
+        print(f"DATABASE_URL: {'OK' if os.environ.get('DATABASE_URL') else 'NÃO CONFIGURADA'}")
+        db.create_all()
+        print("✅ Banco conectado!")
+except Exception as e:
+    print(f"🔴 ERRO CRÍTICO: {e}")
+    print(f"Tipo: {type(e).__name__}")
+    import traceback
+    traceback.print_exc()
+    raise
 
 # =============================================================================
 # INICIALIZAÇÃO DO SERVIDOR
 # =============================================================================
+
+# Rota simples para testar se a app está rodando
+@app.route('/health', methods=['GET'])
+def health_check():
+    try:
+        # Testa conexão com o banco
+        db.session.execute('SELECT 1')
+        return jsonify({"status": "ok", "database": "connected"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
