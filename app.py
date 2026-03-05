@@ -27,14 +27,18 @@ app = Flask(__name__)
 # =============================================================================
 # CONFIGURAÇÃO DO BANCO DE DADOS
 # =============================================================================
-# Pega a DATABASE_URL do ambiente (Render) ou usa SQLite local
+# Pega a DATABASE_URL e corrige o prefixo
 database_url = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
 
+# Corrige postgres:// para postgresql://
 if database_url and database_url.startswith('postgres://'):
     database_url = database_url.replace('postgres://', 'postgresql://', 1)
 
+# Força o uso do driver psycopg (versão 3) em vez de psycopg2
+if database_url.startswith('postgresql://') and not database_url.startswith('postgresql+psycopg://'):
+    database_url = database_url.replace('postgresql://', 'postgresql+psycopg://', 1)
+
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 
