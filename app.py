@@ -4,7 +4,7 @@
 from flask import Flask, jsonify, request, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.dialects.postgresql import psycopg
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from sqlalchemy import text
 import os
@@ -431,7 +431,9 @@ def relatorio_vendas():
         if data_fim:
             try:
                 data_fim_dt = datetime.strptime(data_fim, '%Y-%m-%d')
-                query = query.filter(Venda.data_venda <= data_fim_dt)
+        # Inclui todo o dia final (até 23:59:59)            
+                data_fim_dt = data_fim_dt + timedelta(days=1)
+                query = query.filter(Venda.data_venda < data_fim_dt)
             except:
                 return jsonify({"erro": "Formato de data_fim inválido. Use YYYY-MM-DD"}), 400
         
