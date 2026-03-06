@@ -6,6 +6,7 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.dialects.postgresql import psycopg
 from datetime import datetime
 from decimal import Decimal
+from sqlalchemy import text
 import os
 
 import logging
@@ -751,12 +752,12 @@ def buscar_cliente_por_telefone():
 # Criar tabelas se não existirem (com tratamento de erro)
 try:
     with app.app_context():
-        print("🔵 Iniciando conexão com o banco...")
+        print("Iniciando conexão com o banco...")
         print(f"DATABASE_URL: {'OK' if os.environ.get('DATABASE_URL') else 'NÃO CONFIGURADA'}")
         db.create_all()
-        print("✅ Banco conectado!")
+        print("Banco conectado!")
 except Exception as e:
-    print(f"🔴 ERRO CRÍTICO: {e}")
+    print(f"ERRO CRÍTICO: {e}")
     print(f"Tipo: {type(e).__name__}")
     import traceback
     traceback.print_exc()
@@ -769,12 +770,22 @@ except Exception as e:
 # Rota simples para testar se a app está rodando
 @app.route('/health', methods=['GET'])
 def health_check():
-    try:
-        # Testa conexão com o banco
-        db.session.execute('SELECT 1')
-        return jsonify({"status": "ok", "database": "connected"}), 200
+    try:        
+        from sqlalchemy import text
+        db.session.execute(text('SELECT 1'))
+        db.session.commit()
+        return jsonify({
+            "status": "ok",
+            "database": "connected",
+            "timestamp": datetime.utcnow().isoformat()
+        }), 200
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+# =============================================================================
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
