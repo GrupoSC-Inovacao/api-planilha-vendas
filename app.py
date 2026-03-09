@@ -331,6 +331,137 @@ class Produto(db.Model):
         }
 
 # -----------------------------------------------------------------------------
+# TABELA: ofertas
+# -----------------------------------------------------------------------------
+class Oferta(db.Model):
+    __tablename__ = 'ofertas'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    
+    # Identificação da oferta
+    nome = db.Column(db.String(255), nullable=False, index=True)
+    
+    # Vínculo com produto
+    produto_id = db.Column(db.Integer, db.ForeignKey('produtos.id'), nullable=False)
+    
+    # Dados do produto (snapshot no momento da oferta)
+    cod_sap = db.Column(db.String(100))
+    ean = db.Column(db.String(50))
+    descricao_curta = db.Column(db.String(255))
+    descricao_longa = db.Column(db.Text)
+    
+    # Preços
+    preco_original = db.Column(db.Numeric(10,2), nullable=False)
+    preco_oferta = db.Column(db.Numeric(10,2), nullable=False)
+    desconto_percentual = db.Column(db.Numeric(5,2))
+    
+    # Imagem da oferta (URL construída a partir do nome)
+    nome_imagem = db.Column(db.String(255), nullable=False)
+    url_imagem = db.Column(db.String(500), nullable=False)
+    
+    # Segmentação (opcional - se vazio, vale para todos)
+    cnpj_cliente = db.Column(db.String(20), index=True)
+    ddd_regiao = db.Column(db.String(2), index=True)
+    
+    # Validade
+    data_inicio = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    valida_ate = db.Column(db.DateTime, nullable=False)
+    status = db.Column(db.String(20), default='ativa')
+    
+    # Metadados
+    observacoes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relacionamento com produto
+    produto = db.relationship('Produto', backref='ofertas')
+    
+    # Verificação de validade   
+    def esta_valida(self):
+        """
+        Verifica se a oferta está válida:
+        - Status deve ser 'ativa'
+        - Data atual deve estar entre data_inicio e valida_ate
+        """
+        if self.status != 'ativa':
+            return False
+        
+        agora = datetime.utcnow()
+        if agora < self.data_inicio:
+            return False
+        
+        if agora > self.valida_ate:
+            return False
+        
+        return True
+    
+    def atualizar_status_se_expirada(self):
+        """
+        Atualiza o status para 'expirada' se passou da data de validade.
+        Retorna True se o status foi alterado.
+        """
+        if self.status == 'ativa':
+            agora = datetime.utcnow()
+            if agora < self.data_inicio or agora > self.valida_ate:
+                self.status = 'expirada'
+                return True
+        return False
+    
+    def eh_para_cliente(self, cnpj=None, ddd=None):
+        """
+        Verifica se a oferta é válida para um cliente específico.
+        
+        Regras:
+        - Se cnpj_cliente e ddd_regiao estiverem vazios → vale para todos
+        - Se cnpj_cliente preenchido → só vale para aquele CNPJ
+        - Se ddd_regiao preenchido → só vale para aquela região
+        - Se ambos preenchidos → precisa匹配 ambos
+        """
+        # Se não tem segmentação, vale para todos
+        if not self.cnpj_cliente and not self.ddd_regiao:
+            return True
+        
+        # Verifica CNPJ
+        if self.cnpj_cliente and cnpj:
+            if self.cnpj_cliente != cnpj:
+                return False
+        elif self.cnpj_cliente and not cnpj:
+            return False
+        
+        # Verifica DDD
+        if self.ddd_regiao and ddd:
+            if self.ddd_regiao != ddd:
+                return False
+        elif self.ddd_regiao and not ddd:
+            return False
+        
+        return True
+    
+    # Conversão para JSON    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'nome': self.nome,
+            'produto_id': self.produto_id,
+            'cod_sap': self.cod_sap,
+            'ean': self.ean,
+            'descricao_curta': self.descricao_curta,
+            'descricao_longa': self.descricao_longa,
+            'preco_original': float(self.preco_original) if self.preco_original else None,
+            'preco_oferta': float(self.preco_oferta) if self.preco_oferta else None,
+            'desconto_percentual': float(self.desconto_percentual) if self.desconto_percentual else None,
+            'nome_imagem': self.nome_imagem,
+            'url_imagem': self.url_imagem,
+            'cnpj_cliente': self.cnpj_cliente,
+            'ddd_regiao': self.ddd_regiao,
+            'data_inicio': self.data_inicio.strftime('%Y-%m-%d %H:%M:%S') if self.data_inicio else None,
+            'valida_ate': self.valida_ate.strftime('%Y-%m-%d %H:%M:%S') if self.valida_ate else None,
+            'status': self.status,
+            'esta_valida': self.esta_valida(),
+            'observacoes': self.observacoes
+        }
+
+# -----------------------------------------------------------------------------
 # TABELA: clientes
 # -----------------------------------------------------------------------------
 class Cliente(db.Model):
@@ -1020,6 +1151,273 @@ def excluir_cotacao():
         print(f"Erro ao excluir cotação: {e}")
         db.session.rollback()
         return jsonify({"erro": "Falha ao excluir cotação"}), 500
+
+# -----------------------------------------------------------------------------
+# POST /ofertas - CADASTRAR NOVA OFERTA
+# -----------------------------------------------------------------------------
+@app.route('/ofertas', methods=['POST'])
+def cadastrar_oferta():
+    """
+    Cadastra uma nova oferta promocional.
+    
+    Body esperado:
+    {
+        "nome": "promocao-natal-2026",
+        "produto_id": 63,
+        "preco_oferta": 199.90,
+        "nome_imagem": "promocao-natal-2026.jpg",
+        "valida_ate": "2026-12-31",
+        "data_inicio": "2026-12-01",  // opcional, padrão: hoje
+        "cnpj_cliente": "33456789000132",  // opcional
+        "ddd_regiao": "11",  // opcional
+        "observacoes": "Oferta especial de Natal"
+    }
+    """
+    try:
+        dados = request.get_json()
+        if not dados:
+            return jsonify({"erro": "Corpo da requisição inválido"}), 400
+        
+        # Campos obrigatórios
+        nome = str(dados.get("nome", "")).strip()
+        produto_id = dados.get("produto_id")
+        preco_oferta = dados.get("preco_oferta")
+        nome_imagem = str(dados.get("nome_imagem", "")).strip()
+        valida_ate_str = dados.get("valida_ate")
+        
+        if not nome or not produto_id or not preco_oferta or not nome_imagem or not valida_ate_str:
+            return jsonify({
+                "erro": "Campos obrigatórios: nome, produto_id, preco_oferta, nome_imagem, valida_ate"
+            }), 400
+        
+        # Buscar produto para pegar dados completos
+        produto = Produto.query.get(produto_id)
+        if not produto:
+            return jsonify({"erro": f"Produto {produto_id} não encontrado"}), 404
+        
+        # Validar datas
+        try:
+            valida_ate = datetime.strptime(valida_ate_str, '%Y-%m-%d')
+        except:
+            return jsonify({"erro": "Formato de valida_ate inválido. Use YYYY-MM-DD"}), 400
+        
+        data_inicio = datetime.utcnow()
+        if dados.get("data_inicio"):
+            try:
+                data_inicio = datetime.strptime(dados.get("data_inicio"), '%Y-%m-%d')
+            except:
+                return jsonify({"erro": "Formato de data_inicio inválido. Use YYYY-MM-DD"}), 400
+        
+        # Calcular desconto percentual
+        preco_original = float(produto.preco) if produto.preco else 0
+        desconto_percentual = 0
+        if preco_original > 0:
+            desconto_percentual = ((preco_original - float(preco_oferta)) / preco_original) * 100
+        
+        # Construir URL da imagem
+        base_url = request.url_root.rstrip('/')
+        url_imagem = f"{base_url}/imagens-arquivo/{nome_imagem}"
+        
+        # Campos opcionais
+        cnpj_cliente = str(dados.get("cnpj_cliente", "")).strip() or None
+        ddd_regiao = str(dados.get("ddd_regiao", "")).strip() or None
+        observacoes = dados.get("observacoes", "")
+        
+        # Verificar se já existe oferta com mesmo nome
+        oferta_existente = Oferta.query.filter_by(nome=nome).first()
+        if oferta_existente:
+            return jsonify({
+                "erro": f"Já existe uma oferta com o nome '{nome}'. Use um nome único."
+            }), 409
+        
+        # Criar nova oferta
+        nova_oferta = Oferta(
+            nome=nome,
+            produto_id=produto.id,
+            cod_sap=produto.cod_sap,
+            ean=produto.ean,
+            descricao_curta=produto.descricao_curta,
+            descricao_longa=produto.descricao_longa,
+            preco_original=preco_original,
+            preco_oferta=preco_oferta,
+            desconto_percentual=desconto_percentual,
+            nome_imagem=nome_imagem,
+            url_imagem=url_imagem,
+            cnpj_cliente=cnpj_cliente,
+            ddd_regiao=ddd_regiao,
+            data_inicio=data_inicio,
+            valida_ate=valida_ate,
+            status='ativa',
+            observacoes=observacoes
+        )
+        
+        db.session.add(nova_oferta)
+        db.session.commit()
+        
+        return jsonify({
+            "mensagem": "Oferta cadastrada com sucesso",
+            "oferta": nova_oferta.to_dict()
+        }), 201
+        
+    except Exception as e:
+        print(f"Erro ao cadastrar oferta: {e}")
+        db.session.rollback()
+        return jsonify({"erro": "Falha ao cadastrar oferta"}), 500
+
+# -----------------------------------------------------------------------------
+# GET /ofertas - BUSCAR OFERTAS
+# -----------------------------------------------------------------------------
+@app.route('/ofertas', methods=['GET'])
+def buscar_ofertas():
+    """
+    Busca ofertas filtrando por telefone, CNPJ e/ou DDD.
+    Valida automaticamente e exclui ofertas expiradas.
+    
+    Query params:
+    - telefone: 5511910589650 (opcional, usado para extrair DDD)
+    - cnpj: 33456789000132 (opcional)
+    - ddd: 11 (opcional, extraído do telefone se não informado)
+    - nome: promocao-natal (opcional, busca por nome)
+    - ativas: true (opcional, default=true - só traz ofertas válidas)
+    
+    Exemplos:
+    GET /ofertas?telefone=5511910589650
+    GET /ofertas?cnpj=33456789000132
+    GET /ofertas?ddd=11
+    GET /ofertas?telefone=5511910589650&cnpj=33456789000132
+    GET /ofertas?nome=promocao-natal
+    """
+    try:
+        # Pegar parâmetros da query string
+        telefone = request.args.get('telefone', '').strip()
+        cnpj = request.args.get('cnpj', '').strip()
+        ddd = request.args.get('ddd', '').strip()
+        nome = request.args.get('nome', '').strip()
+        apenas_ativas = request.args.get('ativas', 'true').lower() == 'true'
+        
+        # Extrair DDD do telefone se não informado
+        if not ddd and telefone and len(telefone) >= 11:
+            ddd = telefone[2:4]
+        
+        # Construir query dinâmica
+        query = Oferta.query
+        
+        # Filtro por nome (se informado)
+        if nome:
+            query = query.filter(Oferta.nome.ilike(f'%{nome}%'))
+        
+        # Ordenar por data de validade
+        query = query.order_by(Oferta.valida_ate.desc())
+        
+        # Executar consulta
+        ofertas = query.all()
+        
+        if not ofertas:
+            return jsonify({"mensagem": "Nenhuma oferta encontrada"}), 201
+        
+        # Filtrar e atualizar status
+        resultado = []
+        ofertas_alteradas = []
+        
+        for oferta in ofertas:
+            # Atualizar status se estiver expirada
+            if oferta.atualizar_status_se_expirada():
+                ofertas_alteradas.append(oferta)
+            
+            # Se quiser apenas ativas, pular as inválidas
+            if apenas_ativas and not oferta.esta_valida():
+                continue
+            
+            # Verificar segmentação (CNPJ e DDD)
+            if cnpj or ddd:
+                if not oferta.eh_para_cliente(cnpj=cnpj, ddd=ddd):
+                    continue
+            
+            # Adicionar ao resultado
+            resultado.append(oferta.to_dict())
+        
+        # Salvar alterações de status no banco
+        if ofertas_alteradas:
+            db.session.commit()
+            print(f"Status atualizado para 'expirada' em {len(ofertas_alteradas)} oferta(s)")
+        
+        if not resultado:
+            return jsonify({"mensagem": "Nenhuma oferta encontrada para este cliente/região"}), 201
+        
+        return jsonify({
+            "ofertas": resultado,
+            "total_encontrado": len(resultado),
+            "filtros_aplicados": {
+                "cnpj": cnpj,
+                "ddd": ddd,
+                "telefone": telefone,
+                "apenas_ativas": apenas_ativas
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"Erro ao buscar ofertas: {e}")
+        db.session.rollback()
+        return jsonify({"erro": "Falha ao buscar ofertas"}), 500
+
+# -----------------------------------------------------------------------------
+# DELETE /ofertas - EXCLUIR OFERTA POR NOME OU ID
+# -----------------------------------------------------------------------------
+@app.route('/ofertas', methods=['DELETE'])
+def excluir_oferta():
+    """
+    Exclui uma oferta pelo nome ou ID.
+    
+    Query params (pelo menos um é obrigatório):
+    - nome: promocao-natal-2026
+    - id: 1
+    
+    Exemplos:
+    DELETE /ofertas?nome=promocao-natal-2026
+    DELETE /ofertas?id=1
+    """
+    try:
+        nome = request.args.get('nome', '').strip()
+        oferta_id = request.args.get('id', '')
+        
+        # Pelo menos um filtro é obrigatório
+        if not nome and not oferta_id:
+            return jsonify({"erro": "Informe pelo menos: nome ou id da oferta"}), 400
+        
+        # Construir query
+        query = Oferta.query
+        
+        if nome:
+            query = query.filter_by(nome=nome)
+        if oferta_id:
+            try:
+                oferta_id = int(oferta_id)
+                query = query.filter_by(id=oferta_id)
+            except:
+                return jsonify({"erro": "ID deve ser um número inteiro"}), 400
+        
+        # Buscar oferta(s)
+        ofertas = query.all()
+        
+        if not ofertas:
+            return jsonify({"mensagem": "Nenhuma oferta encontrada para excluir"}), 200
+        
+        # Excluir ofertas
+        for oferta in ofertas:
+            db.session.delete(oferta)
+        
+        db.session.commit()
+        
+        return jsonify({
+            "mensagem": "Oferta(s) excluída(s) com sucesso",
+            "ofertas_excluidas": len(ofertas),
+            "nomes_excluidos": [oferta.nome for oferta in ofertas]
+        }), 200
+        
+    except Exception as e:
+        print(f"Erro ao excluir oferta: {e}")
+        db.session.rollback()
+        return jsonify({"erro": "Falha ao excluir oferta"}), 500
 
 # -----------------------------------------------------------------------------
 # GET /vendas/ultima/<cnpj> - BUSCAR ÚLTIMA VENDA DO CLIENTE
