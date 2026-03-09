@@ -196,9 +196,9 @@ class Cotacao(db.Model):
     
     # Dados da cotação
     data_cotacao = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
-    valida_ate = db.Column(db.DateTime)  # Data de validade da cotação
+    valida_ate = db.Column(db.DateTime)
     observacoes = db.Column(db.Text)
-    status = db.Column(db.String(20), default='ativa')  # ativa, expirada, convertida, cancelada
+    status = db.Column(db.String(20), default='ativa')
     
     # Relacionamento com itens
     itens = db.relationship('CotacaoItem', backref='cotacao', lazy=True, cascade='all, delete-orphan')
@@ -206,6 +206,39 @@ class Cotacao(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    # Verificação de validade    
+    def esta_valida(self):
+        """
+        Verifica se a cotação está válida:
+        - Status deve ser 'ativa'
+        - Data atual deve ser <= valida_ate (se definida)
+        
+        Retorna: bool
+        """
+        # Se não está com status 'ativa', já está inválida
+        if self.status != 'ativa':
+            return False
+        
+        # Se tem data de validade e já passou, está expirada
+        if self.valida_ate and datetime.utcnow() > self.valida_ate:
+            return False
+        
+        # Caso contrário, está válida
+        return True
+    
+    def atualizar_status_se_expirada(self):
+        """
+        Atualiza o status para 'expirada' se passou da data de validade.
+        
+        Retorna: bool (True se o status foi alterado)
+        """
+        if self.status == 'ativa' and self.valida_ate and datetime.utcnow() > self.valida_ate:
+            self.status = 'expirada'
+            return True
+        return False
+
+    # Conversão para JSON
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -217,6 +250,7 @@ class Cotacao(db.Model):
             'valida_ate': self.valida_ate.strftime('%Y-%m-%d %H:%M:%S') if self.valida_ate else None,
             'observacoes': self.observacoes,
             'status': self.status,
+            'esta_valida': self.esta_valida(),
             'itens': [item.to_dict() for item in self.itens]
         }
 
@@ -846,26 +880,32 @@ def sincronizar_cotacao():
 def buscar_cotacao():
     """
     Busca cotações filtrando por telefone e/ou código.
+    Verifica e atualiza automaticamente o status de validade.
     
     Query params:
     - telefone: 5511910589650 (opcional)
     - codigo: COT-2026-001 (opcional)
     - status: ativa (opcional)
+    - valida: true|false (opcional) - filtra por validade atual
     
     Exemplos:
     GET /cotacoes?telefone=5511910589650
     GET /cotacoes?codigo=COT-2026-001
     GET /cotacoes?telefone=5511910589650&codigo=COT-2026-001
     GET /cotacoes?status=ativa
+    GET /cotacoes?valida=true  ← Apenas cotações válidas
+    GET /cotacoes?telefone=5511910589650&valida=true
     """
     try:
+        # Pegar parâmetros da query string
         telefone = request.args.get('telefone', '').strip()
         codigo = request.args.get('codigo', '').strip()
         status = request.args.get('status', '').strip()
+        apenas_validas = request.args.get('valida', '').lower() == 'true'  # ← NOVO!
         
         # Pelo menos um filtro é obrigatório
-        if not telefone and not codigo and not status:
-            return jsonify({"erro": "Informe pelo menos: telefone, código ou status"}), 400
+        if not telefone and not codigo and not status and not apenas_validas:
+            return jsonify({"erro": "Informe pelo menos: telefone, código, status ou valida"}), 400
         
         # Construir query dinâmica
         query = Cotacao.query
@@ -880,21 +920,39 @@ def buscar_cotacao():
         # Ordenar por data decrescente
         query = query.order_by(Cotacao.data_cotacao.desc())
         
+        # Executar consulta
         cotacoes = query.all()
+        
+        # Filtrar apenas válidas se solicitado (após buscar do banco)
+        if apenas_validas:
+            cotacoes = [cot for cot in cotacoes if cot.esta_valida()]
         
         if not cotacoes:
             return jsonify({"mensagem": "Nenhuma cotação encontrada"}), 201
         
-        # Formatar resposta
+        # Formatar resposta com verificação e atualização de validade
         resultado = []
-        for cot in cotacoes:
+        cotacoes_alteradas = []  # Trackear quais foram alteradas para commit
+        
+        for cot in cotacoes:            
+            if cot.atualizar_status_se_expirada():
+                cotacoes_alteradas.append(cot)
+            
+            # Calcular totais
             valor_total = sum(float(item.subtotal) for item in cot.itens)
             total_itens = sum(item.quantidade for item in cot.itens)
+            
+            # Montar resposta
             resultado.append({
                 **cot.to_dict(),
                 "total_itens": total_itens,
                 "valor_total": valor_total
             })
+        
+        #Salvar alterações de status no banco (apenas se alguma mudou)
+        if cotacoes_alteradas:
+            db.session.commit()
+            print(f"Status atualizado para 'expirada' em {len(cotacoes_alteradas)} cotação(ões)")
         
         return jsonify({
             "cotacoes": resultado,
@@ -903,6 +961,7 @@ def buscar_cotacao():
         
     except Exception as e:
         print(f"Erro ao buscar cotação: {e}")
+        db.session.rollback()
         return jsonify({"erro": "Falha ao buscar cotação"}), 500
 
 # -----------------------------------------------------------------------------
@@ -1406,8 +1465,6 @@ def health_check():
             "status": "error",
             "message": str(e)
         }), 500
-
-# =============================================================================
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
