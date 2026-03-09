@@ -132,6 +132,53 @@ class VendaItem(db.Model):
         }
 
 # -----------------------------------------------------------------------------
+# TABELA: carrinho_abandonado (itens adicionados mas venda não finalizada)
+# -----------------------------------------------------------------------------
+class CarrinhoAbandonado(db.Model):
+    __tablename__ = 'carrinho_abandonado'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    
+    # Dados do cliente
+    telefone = db.Column(db.String(20), nullable=False, index=True)
+    empresa = db.Column(db.String(255)) 
+    cnpj = db.Column(db.String(20))
+    
+    # Dados do produto
+    produto_id = db.Column(db.Integer, db.ForeignKey('produtos.id'), nullable=False)
+    cod_sap = db.Column(db.String(100))
+    ean = db.Column(db.String(50))
+    descricao_curta = db.Column(db.String(255))
+    preco_unitario = db.Column(db.Numeric(10,2), nullable=False)
+    quantidade = db.Column(db.Integer, nullable=False, default=1)
+    subtotal = db.Column(db.Numeric(10,2), nullable=False)
+    
+    # Metadados
+    #session_id = db.Column(db.String(100))
+    adicionado_em = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relacionamento com produto
+    produto = db.relationship('Produto', backref='carrinho_itens')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'telefone': self.telefone,
+            'empresa': self.empresa,
+            'cnpj': self.cnpj,
+            'produto_id': self.produto_id,
+            'cod_sap': self.cod_sap,
+            'ean': self.ean,
+            'descricao_curta': self.descricao_curta,
+            'preco_unitario': float(self.preco_unitario) if self.preco_unitario else None,
+            'quantidade': self.quantidade,
+            'subtotal': float(self.subtotal) if self.subtotal else None,
+            'adicionado_em': self.adicionado_em.strftime('%Y-%m-%d %H:%M:%S') if self.adicionado_em else None,
+            'updated_at': self.updated_at.strftime('%Y-%m-%d %H:%M:%S') if self.updated_at else None
+        }
+
+# -----------------------------------------------------------------------------
 # TABELA: produtos (catálogo de produtos)
 # -----------------------------------------------------------------------------
 class Produto(db.Model):
@@ -341,6 +388,210 @@ def salvar_venda():
         print(f"Erro ao salvar venda: {e}")
         db.session.rollback()
         return jsonify({"erro": "Falha ao salvar venda"}), 500
+
+# -----------------------------------------------------------------------------
+# POST /carrinho - SINCRONIZAR CARRINHO ABANDONADO (ESTADO COMPLETO)
+# -----------------------------------------------------------------------------
+@app.route('/carrinho', methods=['POST'])
+def sincronizar_carrinho():
+    """
+    Sincroniza o carrinho abandonado com o estado enviado.
+    Adiciona, atualiza ou remove itens conforme necessário.
+    
+    Body esperado (envia o carrinho COMPLETO atual):
+    {
+        "telefone": "5511910589650",
+        "empresa": "SC01",  // opcional
+        "cnpj": "33456789000132",  // opcional
+        "itens": [
+            {"produto_id": 93, "quantidade": 4},
+            {"produto_id": 103, "quantidade": 2}
+        ]
+    }
+    """
+    try:
+        dados = request.get_json()
+        if not dados:
+            return jsonify({"erro": "Corpo da requisição inválido"}), 400
+        
+        # Identificador do cliente
+        telefone = str(dados.get("telefone", "")).strip()
+        empresa = str(dados.get("empresa", "")).strip()
+        cnpj = str(dados.get("cnpj", "")).strip()
+        
+        if not telefone:
+            return jsonify({"erro": "Telefone é obrigatório"}), 400
+        
+        # Itens do carrinho
+        itens_enviados = dados.get("itens", [])
+        
+        if not itens_enviados:
+            # Se não veio nenhum item, limpa o carrinho
+            CarrinhoAbandonado.query.filter_by(telefone=telefone).delete()
+            db.session.commit()
+            return jsonify({
+                "mensagem": "Carrinho limpo",
+                "carrinho": {
+                    "itens": [],
+                    "total_itens": 0,
+                    "valor_total": 0
+                }
+            }), 200
+        
+        # Buscar itens atuais no banco
+        itens_no_banco = CarrinhoAbandonado.query.filter_by(telefone=telefone).all()
+        
+        # Criar dicionário para comparação rápida (produto_id -> item)
+        banco_dict = {item.produto_id: item for item in itens_no_banco}
+        
+        # Lista de produtos que devem permanecer no carrinho
+        produtos_finais = set()
+        
+        # Processar cada item enviado
+        for item_enviado in itens_enviados:
+            produto_id = item_enviado.get("produto_id")
+            quantidade = item_enviado.get("quantidade", 1)
+            
+            if not produto_id:
+                continue
+            
+            produtos_finais.add(produto_id)
+            
+            # Buscar produto para pegar dados completos
+            produto = Produto.query.get(produto_id)
+            if not produto:
+                continue
+            
+            # Calcular valores
+            preco_unitario = float(produto.preco) if produto.preco else 0
+            subtotal = preco_unitario * quantidade
+            
+            # Verificar se já existe no banco
+            if produto_id in banco_dict:
+                # ATUALIZAR item existente
+                item_existente = banco_dict[produto_id]
+                item_existente.quantidade = quantidade
+                item_existente.subtotal = subtotal
+                item_existente.preco_unitario = preco_unitario
+                item_existente.empresa = empresa if empresa else item_existente.empresa
+                item_existente.cnpj = cnpj if cnpj else item_existente.cnpj
+                item_existente.updated_at = datetime.utcnow()
+            else:
+                # ADICIONAR novo item
+                novo_item = CarrinhoAbandonado(
+                    telefone=telefone,
+                    empresa=empresa,
+                    cnpj=cnpj,
+                    produto_id=produto.id,
+                    cod_sap=produto.cod_sap,
+                    ean=produto.ean,
+                    descricao_curta=produto.descricao_curta,
+                    preco_unitario=preco_unitario,
+                    quantidade=quantidade,
+                    subtotal=subtotal
+                )
+                db.session.add(novo_item)
+        
+        # REMOVER itens que estão no banco mas não foram enviados
+        for produto_id, item in banco_dict.items():
+            if produto_id not in produtos_finais:
+                db.session.delete(item)
+        
+        # Salvar todas as alterações
+        db.session.commit()
+        
+        # Retornar carrinho atualizado
+        carrinho_atualizado = CarrinhoAbandonado.query.filter_by(telefone=telefone).all()
+        valor_total = sum(float(item.subtotal) for item in carrinho_atualizado)
+        total_itens = sum(item.quantidade for item in carrinho_atualizado)
+        
+        return jsonify({
+            "mensagem": "Carrinho sincronizado com sucesso",
+            "carrinho": {
+                "itens": [item.to_dict() for item in carrinho_atualizado],
+                "total_itens": total_itens,
+                "quantidade_tipos": len(carrinho_atualizado),
+                "valor_total": valor_total
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"Erro ao sincronizar carrinho: {e}")
+        db.session.rollback()
+        return jsonify({"erro": "Falha ao sincronizar carrinho"}), 500
+
+# -----------------------------------------------------------------------------
+# GET /carrinho/<telefone> - BUSCAR CARRINHO ABANDONADO DO CLIENTE
+# -----------------------------------------------------------------------------
+@app.route('/carrinho/<telefone>', methods=['GET'])
+def buscar_carrinho_abandonado(telefone):
+    """
+    Retorna todos os itens do carrinho abandonado de um cliente pelo telefone.
+    
+    Exemplo: GET /carrinho/5511910589650
+    """
+    try:
+        if not telefone:
+            return jsonify({"erro": "Telefone é obrigatório"}), 400
+        
+        # Buscar todos os itens do carrinho abandonado do cliente
+        carrinho = CarrinhoAbandonado.query.filter_by(telefone=telefone).order_by(CarrinhoAbandonado.adicionado_em.desc()).all()
+        
+        if not carrinho:
+            return jsonify({"mensagem": "Carrinho vazio"}), 201
+        
+        # Calcular totais
+        valor_total = sum(float(item.subtotal) for item in carrinho)
+        total_itens = sum(item.quantidade for item in carrinho)
+        
+        return jsonify({
+            "carrinho": {
+                "itens": [item.to_dict() for item in carrinho],
+                "total_itens": total_itens,
+                "quantidade_tipos": len(carrinho),
+                "valor_total": valor_total
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"Erro ao buscar carrinho: {e}")
+        return jsonify({"erro": "Falha ao buscar carrinho"}), 500
+
+# -----------------------------------------------------------------------------
+# DELETE /carrinho/<telefone> - LIMPAR CARRINHO ABANDONADO
+# -----------------------------------------------------------------------------
+@app.route('/carrinho/<telefone>', methods=['DELETE'])
+def limpar_carrinho_abandonado(telefone):
+    """
+    Remove todos os itens do carrinho abandonado de um cliente pelo telefone.
+    Útil após finalizar a venda.
+    
+    Exemplo: DELETE /carrinho/5511910589650
+    """
+    try:
+        if not telefone:
+            return jsonify({"erro": "Telefone é obrigatório"}), 400
+        
+        # Buscar e deletar itens
+        carrinho = CarrinhoAbandonado.query.filter_by(telefone=telefone).all()
+        
+        if not carrinho:
+            return jsonify({"mensagem": "Carrinho já está vazio"}), 200
+        
+        for item in carrinho:
+            db.session.delete(item)
+        
+        db.session.commit()
+        
+        return jsonify({
+            "mensagem": "Carrinho limpo com sucesso",
+            "itens_removidos": len(carrinho)
+        }), 200
+        
+    except Exception as e:
+        print(f"Erro ao limpar carrinho: {e}")
+        db.session.rollback()
+        return jsonify({"erro": "Falha ao limpar carrinho"}), 500
 
 # -----------------------------------------------------------------------------
 # GET /vendas/ultima/<cnpj> - BUSCAR ÚLTIMA VENDA DO CLIENTE
