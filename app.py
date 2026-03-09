@@ -179,6 +179,85 @@ class CarrinhoAbandonado(db.Model):
         }
 
 # -----------------------------------------------------------------------------
+# TABELA: cotacoes (cabeçalho da cotação)
+# -----------------------------------------------------------------------------
+class Cotacao(db.Model):
+    __tablename__ = 'cotacoes'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    
+    # Código único da cotação (gerado pelo bot)
+    codigo = db.Column(db.String(50), nullable=False, index=True, unique=True)
+    
+    # Dados do cliente
+    telefone = db.Column(db.String(20), nullable=False, index=True)
+    empresa = db.Column(db.String(255))
+    cnpj = db.Column(db.String(20))
+    
+    # Dados da cotação
+    data_cotacao = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    valida_ate = db.Column(db.DateTime)  # Data de validade da cotação
+    observacoes = db.Column(db.Text)
+    status = db.Column(db.String(20), default='ativa')  # ativa, expirada, convertida, cancelada
+    
+    # Relacionamento com itens
+    itens = db.relationship('CotacaoItem', backref='cotacao', lazy=True, cascade='all, delete-orphan')
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'codigo': self.codigo,
+            'telefone': self.telefone,
+            'empresa': self.empresa,
+            'cnpj': self.cnpj,
+            'data_cotacao': self.data_cotacao.strftime('%Y-%m-%d %H:%M:%S') if self.data_cotacao else None,
+            'valida_ate': self.valida_ate.strftime('%Y-%m-%d %H:%M:%S') if self.valida_ate else None,
+            'observacoes': self.observacoes,
+            'status': self.status,
+            'itens': [item.to_dict() for item in self.itens]
+        }
+
+# -----------------------------------------------------------------------------
+# TABELA: cotacao_itens (itens da cotação)
+# -----------------------------------------------------------------------------
+class CotacaoItem(db.Model):
+    __tablename__ = 'cotacao_itens'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    
+    cotacao_id = db.Column(db.Integer, db.ForeignKey('cotacoes.id'), nullable=False)
+    produto_id = db.Column(db.Integer, db.ForeignKey('produtos.id'), nullable=False)
+    
+    # Dados do produto
+    cod_sap = db.Column(db.String(100))
+    ean = db.Column(db.String(50))
+    descricao_curta = db.Column(db.String(255))
+    preco_unitario = db.Column(db.Numeric(10,2), nullable=False)
+    quantidade = db.Column(db.Integer, nullable=False)
+    subtotal = db.Column(db.Numeric(10,2), nullable=False)
+    
+    # Relacionamento com produto
+    produto = db.relationship('Produto', backref='cotacao_itens')
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'cotacao_id': self.cotacao_id,
+            'produto_id': self.produto_id,
+            'cod_sap': self.cod_sap,
+            'ean': self.ean,
+            'descricao_curta': self.descricao_curta,
+            'preco_unitario': float(self.preco_unitario) if self.preco_unitario else None,
+            'quantidade': self.quantidade,
+            'subtotal': float(self.subtotal) if self.subtotal else None
+        }
+
+# -----------------------------------------------------------------------------
 # TABELA: produtos (catálogo de produtos)
 # -----------------------------------------------------------------------------
 class Produto(db.Model):
@@ -390,7 +469,7 @@ def salvar_venda():
         return jsonify({"erro": "Falha ao salvar venda"}), 500
 
 # -----------------------------------------------------------------------------
-# POST /carrinho - SINCRONIZAR CARRINHO ABANDONADO (ESTADO COMPLETO)
+# POST /carrinho - CARRINHO ABANDONADO
 # -----------------------------------------------------------------------------
 @app.route('/carrinho', methods=['POST'])
 def sincronizar_carrinho():
@@ -592,6 +671,296 @@ def limpar_carrinho_abandonado(telefone):
         print(f"Erro ao limpar carrinho: {e}")
         db.session.rollback()
         return jsonify({"erro": "Falha ao limpar carrinho"}), 500
+
+# -----------------------------------------------------------------------------
+# POST /cotacoes - SINCRONIZAR COTAÇÃO
+# -----------------------------------------------------------------------------
+@app.route('/cotacoes', methods=['POST'])
+def sincronizar_cotacao():
+    """
+    Sincroniza uma cotação com o estado enviado.
+    - Se código não existe: CRIA nova cotação
+    - Se código existe: ATUALIZA itens (adiciona/atualiza/remove)
+    
+    Body esperado:
+    {
+        "telefone": "5511910589650",
+        "empresa": "SC01",
+        "cnpj": "33456789000132",
+        "codigo": "COT-2026-001",
+        "observacoes": "Cotação via WhatsApp",
+        "valida_ate": "2026-03-15",  // opcional
+        "itens": [
+            {"produto_id": 103, "quantidade": 1},
+            {"produto_id": 64, "quantidade": 1}
+        ]
+    }
+    """
+    try:
+        dados = request.get_json()
+        if not dados:
+            return jsonify({"erro": "Corpo da requisição inválido"}), 400
+        
+        # Dados obrigatórios
+        telefone = str(dados.get("telefone", "")).strip()
+        codigo = str(dados.get("codigo", "")).strip()
+        
+        if not telefone or not codigo:
+            return jsonify({"erro": "Telefone e código são obrigatórios"}), 400
+        
+        # Dados opcionais do cliente
+        empresa = str(dados.get("empresa", "")).strip()
+        cnpj = str(dados.get("cnpj", "")).strip()
+        observacoes = dados.get("observacoes", "")
+        valida_ate_str = dados.get("valida_ate")
+        
+        # Itens da cotação
+        itens_enviados = dados.get("itens", [])
+        
+        # Validar data de validade (se informada)
+        valida_ate = None
+        if valida_ate_str:
+            try:
+                valida_ate = datetime.strptime(valida_ate_str, '%Y-%m-%d')
+            except:
+                return jsonify({"erro": "Formato de valida_ate inválido. Use YYYY-MM-DD"}), 400
+        
+        # Buscar cotação existente pelo código
+        cotacao = Cotacao.query.filter_by(codigo=codigo).first()
+        
+        if not cotacao:
+            # CRIAR nova cotação
+            cotacao = Cotacao(
+                codigo=codigo,
+                telefone=telefone,
+                empresa=empresa,
+                cnpj=cnpj,
+                observacoes=observacoes,
+                valida_ate=valida_ate,
+                data_cotacao=datetime.utcnow(),
+                status='ativa'
+            )
+            db.session.add(cotacao)
+            db.session.flush()
+            acao = "Cotação criada"
+        else:
+            # ATUALIZAR dados da cotação existente
+            cotacao.telefone = telefone
+            cotacao.empresa = empresa if empresa else cotacao.empresa
+            cotacao.cnpj = cnpj if cnpj else cotacao.cnpj
+            cotacao.observacoes = observacoes if observacoes else cotacao.observacoes
+            cotacao.valida_ate = valida_ate if valida_ate else cotacao.valida_ate
+            cotacao.updated_at = datetime.utcnow()
+            acao = "Cotação atualizada"
+        
+        # Se não veio itens, apenas retorna a cotação (sem alterar itens)
+        if not itens_enviados:
+            db.session.commit()
+            return jsonify({
+                "mensagem": f"{acao} (sem alteração de itens)",
+                "cotacao": cotacao.to_dict()
+            }), 200
+        
+        # Buscar itens atuais da cotação no banco
+        itens_no_banco = CotacaoItem.query.filter_by(cotacao_id=cotacao.id).all()
+        
+        # Criar dicionário para comparação rápida (produto_id -> item)
+        banco_dict = {item.produto_id: item for item in itens_no_banco}
+        
+        # Lista de produtos que devem permanecer na cotação
+        produtos_finais = set()
+        
+        # Processar cada item enviado
+        for item_enviado in itens_enviados:
+            produto_id = item_enviado.get("produto_id")
+            quantidade = item_enviado.get("quantidade", 1)
+            
+            if not produto_id:
+                continue
+            
+            produtos_finais.add(produto_id)
+            
+            # Buscar produto para pegar dados completos
+            produto = Produto.query.get(produto_id)
+            if not produto:
+                continue
+            
+            # Calcular valores
+            preco_unitario = float(produto.preco) if produto.preco else 0
+            subtotal = preco_unitario * quantidade
+            
+            # Verificar se já existe na cotação
+            if produto_id in banco_dict:
+                # ATUALIZAR item existente
+                item_existente = banco_dict[produto_id]
+                item_existente.quantidade = quantidade
+                item_existente.subtotal = subtotal
+                item_existente.preco_unitario = preco_unitario
+            else:
+                # ADICIONAR novo item
+                novo_item = CotacaoItem(
+                    cotacao_id=cotacao.id,
+                    produto_id=produto.id,
+                    cod_sap=produto.cod_sap,
+                    ean=produto.ean,
+                    descricao_curta=produto.descricao_curta,
+                    preco_unitario=preco_unitario,
+                    quantidade=quantidade,
+                    subtotal=subtotal
+                )
+                db.session.add(novo_item)
+        
+        # REMOVER itens que estão na cotação mas não foram enviados
+        for produto_id, item in banco_dict.items():
+            if produto_id not in produtos_finais:
+                db.session.delete(item)
+        
+        # Salvar todas as alterações
+        db.session.commit()
+        
+        # Recarregar a cotação com os itens atualizados
+        cotacao_atualizada = Cotacao.query.get(cotacao.id)
+        
+        # Calcular totais
+        valor_total = sum(float(item.subtotal) for item in cotacao_atualizada.itens)
+        total_itens = sum(item.quantidade for item in cotacao_atualizada.itens)
+        
+        return jsonify({
+            "mensagem": f"{acao} com sucesso",
+            "cotacao": {
+                **cotacao_atualizada.to_dict(),
+                "total_itens": total_itens,
+                "valor_total": valor_total
+            }
+        }), 200 if acao == "Cotação atualizada" else 201
+        
+    except Exception as e:
+        print(f"Erro ao sincronizar cotação: {e}")
+        db.session.rollback()
+        return jsonify({"erro": "Falha ao sincronizar cotação"}), 500
+
+# -----------------------------------------------------------------------------
+# GET /cotacoes - BUSCAR COTAÇÃO POR TELEFONE E/OU CÓDIGO
+# -----------------------------------------------------------------------------
+@app.route('/cotacoes', methods=['GET'])
+def buscar_cotacao():
+    """
+    Busca cotações filtrando por telefone e/ou código.
+    
+    Query params:
+    - telefone: 5511910589650 (opcional)
+    - codigo: COT-2026-001 (opcional)
+    - status: ativa (opcional)
+    
+    Exemplos:
+    GET /cotacoes?telefone=5511910589650
+    GET /cotacoes?codigo=COT-2026-001
+    GET /cotacoes?telefone=5511910589650&codigo=COT-2026-001
+    GET /cotacoes?status=ativa
+    """
+    try:
+        telefone = request.args.get('telefone', '').strip()
+        codigo = request.args.get('codigo', '').strip()
+        status = request.args.get('status', '').strip()
+        
+        # Pelo menos um filtro é obrigatório
+        if not telefone and not codigo and not status:
+            return jsonify({"erro": "Informe pelo menos: telefone, código ou status"}), 400
+        
+        # Construir query dinâmica
+        query = Cotacao.query
+        
+        if telefone:
+            query = query.filter_by(telefone=telefone)
+        if codigo:
+            query = query.filter_by(codigo=codigo)
+        if status:
+            query = query.filter_by(status=status)
+        
+        # Ordenar por data decrescente
+        query = query.order_by(Cotacao.data_cotacao.desc())
+        
+        cotacoes = query.all()
+        
+        if not cotacoes:
+            return jsonify({"mensagem": "Nenhuma cotação encontrada"}), 201
+        
+        # Formatar resposta
+        resultado = []
+        for cot in cotacoes:
+            valor_total = sum(float(item.subtotal) for item in cot.itens)
+            total_itens = sum(item.quantidade for item in cot.itens)
+            resultado.append({
+                **cot.to_dict(),
+                "total_itens": total_itens,
+                "valor_total": valor_total
+            })
+        
+        return jsonify({
+            "cotacoes": resultado,
+            "total_encontrado": len(resultado)
+        }), 200
+        
+    except Exception as e:
+        print(f"Erro ao buscar cotação: {e}")
+        return jsonify({"erro": "Falha ao buscar cotação"}), 500
+
+# -----------------------------------------------------------------------------
+# DELETE /cotacoes - EXCLUIR COTAÇÃO POR TELEFONE E/OU CÓDIGO
+# -----------------------------------------------------------------------------
+@app.route('/cotacoes', methods=['DELETE'])
+def excluir_cotacao():
+    """
+    Exclui cotações filtrando por telefone e/ou código.
+    
+    Query params:
+    - telefone: 5511910589650 (opcional)
+    - codigo: COT-2026-001 (opcional)
+    
+    Exemplos:
+    DELETE /cotacoes?codigo=COT-2026-001
+    DELETE /cotacoes?telefone=5511910589650
+    DELETE /cotacoes?telefone=5511910589650&codigo=COT-2026-001
+    """
+    try:
+        telefone = request.args.get('telefone', '').strip()
+        codigo = request.args.get('codigo', '').strip()
+        
+        # Pelo menos um filtro é obrigatório
+        if not telefone and not codigo:
+            return jsonify({"erro": "Informe pelo menos: telefone ou código"}), 400
+        
+        # Construir query dinâmica
+        query = Cotacao.query
+        
+        if telefone:
+            query = query.filter_by(telefone=telefone)
+        if codigo:
+            query = query.filter_by(codigo=codigo)
+        
+        # Buscar cotações para excluir
+        cotacoes = query.all()
+        
+        if not cotacoes:
+            return jsonify({"mensagem": "Nenhuma cotação encontrada para excluir"}), 200
+        
+        # Excluir itens primeiro
+        for cot in cotacoes:
+            for item in cot.itens:
+                db.session.delete(item)
+            db.session.delete(cot)
+        
+        db.session.commit()
+        
+        return jsonify({
+            "mensagem": "Cotação(ões) excluída(s) com sucesso",
+            "cotacoes_excluidas": len(cotacoes)
+        }), 200
+        
+    except Exception as e:
+        print(f"Erro ao excluir cotação: {e}")
+        db.session.rollback()
+        return jsonify({"erro": "Falha ao excluir cotação"}), 500
 
 # -----------------------------------------------------------------------------
 # GET /vendas/ultima/<cnpj> - BUSCAR ÚLTIMA VENDA DO CLIENTE
