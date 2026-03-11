@@ -806,6 +806,152 @@ def buscar_carrinho_abandonado(telefone):
         return jsonify({"erro": "Falha ao buscar carrinho"}), 500
 
 # -----------------------------------------------------------------------------
+# POST /carrinho/remover - REMOVER/SUBTRAIR ITENS DO CARRINHO
+# -----------------------------------------------------------------------------
+@app.route('/carrinho/remover', methods=['POST'])
+def remover_do_carrinho():
+    """
+    Remove ou subtrai itens do carrinho abandonado.
+    
+    Lógica:
+    - Se quantidade_a_remover < quantidade_no_carrinho → SUBTRAI e mantém o resto
+    - Se quantidade_a_remover >= quantidade_no_carrinho → REMOVE o produto inteiro
+    
+    Body esperado:
+    {
+        "telefone": "5511910589650",
+        "empresa": "SC01",  // opcional
+        "cnpj": "33456789000132",  // opcional
+        "itens": [
+            {"produto_id": 103, "quantidade": 1},
+            {"produto_id": 65, "quantidade": 2}
+        ]
+    }
+    
+    Exemplos:
+    - Carrinho tem 10 Tylenol, remove 5 → Fica com 5 Tylenol
+    - Carrinho tem 5 Clavulin, remove 5 → Remove Clavulin do carrinho
+    - Carrinho tem 3 Dorflex, remove 10 → Remove Dorflex do carrinho (zera)
+    """
+    try:
+        dados = request.get_json()
+        if not dados:
+            return jsonify({"erro": "Corpo da requisição inválido"}), 400
+        
+        # Identificador do cliente
+        telefone = str(dados.get("telefone", "")).strip()
+        
+        if not telefone:
+            return jsonify({"erro": "Telefone é obrigatório"}), 400
+        
+        # Itens a serem removidos/subtraídos
+        itens_a_remover = dados.get("itens", [])
+        
+        if not itens_a_remover:
+            return jsonify({"erro": "É necessário informar pelo menos um item para remover"}), 400
+        
+        # Buscar itens atuais no carrinho do cliente
+        itens_no_carrinho = CarrinhoAbandonado.query.filter_by(telefone=telefone).all()
+        
+        if not itens_no_carrinho:
+            return jsonify({
+                "mensagem": "Carrinho vazio, nada para remover",
+                "carrinho": {
+                    "itens": [],
+                    "total_itens": 0,
+                    "quantidade_tipos": 0,
+                    "valor_total": 0
+                }
+            }), 200
+        
+        # Criar dicionário para busca rápida (produto_id -> item)
+        carrinho_dict = {item.produto_id: item for item in itens_no_carrinho}
+        
+        # Controlar o que foi processado
+        itens_removidos = []
+        itens_atualizados = []
+        itens_nao_encontrados = []
+        
+        # Processar cada item da solicitação de remoção
+        for item_remover in itens_a_remover:
+            produto_id = item_remover.get("produto_id")
+            quantidade_a_remover = item_remover.get("quantidade", 1)
+            
+            if not produto_id or quantidade_a_remover <= 0:
+                continue
+            
+            # Verificar se o produto existe no carrinho
+            if produto_id not in carrinho_dict:
+                itens_nao_encontrados.append({
+                    "produto_id": produto_id,
+                    "mensagem": "Produto não encontrado no carrinho"
+                })
+                continue
+            
+            item_no_carrinho = carrinho_dict[produto_id]
+            quantidade_atual = item_no_carrinho.quantidade
+            
+            # Calcular nova quantidade
+            nova_quantidade = quantidade_atual - quantidade_a_remover
+            
+            if nova_quantidade > 0:
+                # SUBTRAIR: mantém o produto com quantidade reduzida
+                item_no_carrinho.quantidade = nova_quantidade
+                preco_unitario = float(item_no_carrinho.preco_unitario) if item_no_carrinho.preco_unitario else 0
+                item_no_carrinho.subtotal = preco_unitario * nova_quantidade
+                item_no_carrinho.updated_at = datetime.utcnow()
+                
+                itens_atualizados.append({
+                    "produto_id": produto_id,
+                    "quantidade_anterior": quantidade_atual,
+                    "quantidade_removida": quantidade_a_remover,
+                    "quantidade_atual": nova_quantidade
+                })
+            else:
+                # REMOVER: quantidade zerou ou ficou negativa, exclui do carrinho
+                db.session.delete(item_no_carrinho)
+                
+                itens_removidos.append({
+                    "produto_id": produto_id,
+                    "quantidade_anterior": quantidade_atual,
+                    "quantidade_removida": quantidade_a_remover,
+                    "mensagem": "Produto removido do carrinho"
+                })
+        
+        # Salvar alterações no banco
+        db.session.commit()
+        
+        # Retornar carrinho atualizado
+        carrinho_atualizado = CarrinhoAbandonado.query.filter_by(telefone=telefone).all()
+        valor_total = sum(float(item.subtotal) for item in carrinho_atualizado)
+        total_itens = sum(item.quantidade for item in carrinho_atualizado)
+        
+        return jsonify({
+            "mensagem": "Itens removidos/subtraídos com sucesso",
+            "resumo": {
+                "itens_removidos": len(itens_removidos),
+                "itens_atualizados": len(itens_atualizados),
+                "itens_nao_encontrados": len(itens_nao_encontrados)
+            },
+            "detalhes": {
+                "removidos": itens_removidos,
+                "atualizados": itens_atualizados,
+                "nao_encontrados": itens_nao_encontrados
+            },
+            "carrinho": {
+                "itens": [item.to_dict() for item in carrinho_atualizado],
+                "total_itens": total_itens,
+                "quantidade_tipos": len(carrinho_atualizado),
+                "valor_total": valor_total
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"Erro ao remover do carrinho: {e}")
+        db.session.rollback()
+        return jsonify({"erro": "Falha ao remover itens do carrinho"}), 500
+
+# -----------------------------------------------------------------------------
 # DELETE /carrinho/<telefone> - LIMPAR CARRINHO ABANDONADO
 # -----------------------------------------------------------------------------
 @app.route('/carrinho/<telefone>', methods=['DELETE'])
