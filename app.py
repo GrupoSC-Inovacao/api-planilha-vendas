@@ -634,15 +634,15 @@ def salvar_venda():
         return jsonify({"erro": "Falha ao salvar venda"}), 500
 
 # -----------------------------------------------------------------------------
-# POST /carrinho - CARRINHO ABANDONADO
+# POST /carrinho - ADICIONAR/ACUMULAR ITENS NO CARRINHO ABANDONADO
 # -----------------------------------------------------------------------------
 @app.route('/carrinho', methods=['POST'])
-def sincronizar_carrinho():
+def adicionar_ao_carrinho():
     """
-    Sincroniza o carrinho abandonado com o estado enviado.
-    Adiciona, atualiza ou remove itens conforme necessário.
+    Adiciona ou acumula itens no carrinho abandonado.
+    NUNCA remove itens - apenas adiciona novos ou atualiza quantidades (somando).
     
-    Body esperado (envia o carrinho COMPLETO atual):
+    Body esperado:
     {
         "telefone": "5511910589650",
         "empresa": "SC01",  // opcional
@@ -652,6 +652,11 @@ def sincronizar_carrinho():
             {"produto_id": 103, "quantidade": 2}
         ]
     }
+    
+    Comportamento:
+    - Produto novo no carrinho → ADICIONA
+    - Produto existente → SOMA quantidade (ex: 5 + 5 = 10)
+    - Produto não enviado → MANTÉM no carrinho (não remove)
     """
     try:
         dados = request.get_json()
@@ -666,62 +671,63 @@ def sincronizar_carrinho():
         if not telefone:
             return jsonify({"erro": "Telefone é obrigatório"}), 400
         
-        # Itens do carrinho
+        # Itens a serem adicionados/acumulados
         itens_enviados = dados.get("itens", [])
         
         if not itens_enviados:
-            # Se não veio nenhum item, limpa o carrinho
-            CarrinhoAbandonado.query.filter_by(telefone=telefone).delete()
-            db.session.commit()
+            # Se não veio nenhum item, apenas retorna o carrinho atual
+            carrinho_atual = CarrinhoAbandonado.query.filter_by(telefone=telefone).all()
+            valor_total = sum(float(item.subtotal) for item in carrinho_atual)
+            total_itens = sum(item.quantidade for item in carrinho_atual)
+            
             return jsonify({
-                "mensagem": "Carrinho limpo",
+                "mensagem": "Nenhum item enviado para adicionar",
                 "carrinho": {
-                    "itens": [],
-                    "total_itens": 0,
-                    "valor_total": 0
+                    "itens": [item.to_dict() for item in carrinho_atual],
+                    "total_itens": total_itens,
+                    "quantidade_tipos": len(carrinho_atual),
+                    "valor_total": valor_total
                 }
             }), 200
         
         # Buscar itens atuais no banco
         itens_no_banco = CarrinhoAbandonado.query.filter_by(telefone=telefone).all()
         
-        # Criar dicionário para comparação rápida (produto_id -> item)
+        # Criar dicionário para busca rápida (produto_id -> item)
         banco_dict = {item.produto_id: item for item in itens_no_banco}
-        
-        # Lista de produtos que devem permanecer no carrinho
-        produtos_finais = set()
         
         # Processar cada item enviado
         for item_enviado in itens_enviados:
             produto_id = item_enviado.get("produto_id")
-            quantidade = item_enviado.get("quantidade", 1)
+            quantidade_enviada = item_enviado.get("quantidade", 1)
             
             if not produto_id:
                 continue
-            
-            produtos_finais.add(produto_id)
             
             # Buscar produto para pegar dados completos
             produto = Produto.query.get(produto_id)
             if not produto:
                 continue
             
-            # Calcular valores
+            # Calcular preço unitário
             preco_unitario = float(produto.preco) if produto.preco else 0
-            subtotal = preco_unitario * quantidade
             
-            # Verificar se já existe no banco
-            if produto_id in banco_dict:
-                # ATUALIZAR item existente
+            # Verificar se já existe no carrinho
+            if produto_id in banco_dict:              
                 item_existente = banco_dict[produto_id]
-                item_existente.quantidade = quantidade
-                item_existente.subtotal = subtotal
+                nova_quantidade = item_existente.quantidade + quantidade_enviada
+                item_existente.quantidade = nova_quantidade
+                item_existente.subtotal = preco_unitario * nova_quantidade
                 item_existente.preco_unitario = preco_unitario
                 item_existente.empresa = empresa if empresa else item_existente.empresa
                 item_existente.cnpj = cnpj if cnpj else item_existente.cnpj
                 item_existente.updated_at = datetime.utcnow()
+                
+                # Atualiza dicionário para próxima iteração
+                banco_dict[produto_id] = item_existente
             else:
-                # ADICIONAR novo item
+                # ✅ ADICIONAR: novo item no carrinho
+                subtotal = preco_unitario * quantidade_enviada
                 novo_item = CarrinhoAbandonado(
                     telefone=telefone,
                     empresa=empresa,
@@ -731,15 +737,13 @@ def sincronizar_carrinho():
                     ean=produto.ean,
                     descricao_curta=produto.descricao_curta,
                     preco_unitario=preco_unitario,
-                    quantidade=quantidade,
+                    quantidade=quantidade_enviada,
                     subtotal=subtotal
                 )
                 db.session.add(novo_item)
-        
-        # REMOVER itens que estão no banco mas não foram enviados
-        for produto_id, item in banco_dict.items():
-            if produto_id not in produtos_finais:
-                db.session.delete(item)
+                
+                # Adiciona ao dicionário para futuras atualizações
+                banco_dict[produto_id] = novo_item
         
         # Salvar todas as alterações
         db.session.commit()
@@ -750,7 +754,7 @@ def sincronizar_carrinho():
         total_itens = sum(item.quantidade for item in carrinho_atualizado)
         
         return jsonify({
-            "mensagem": "Carrinho sincronizado com sucesso",
+            "mensagem": "Itens adicionados/acumulados no carrinho com sucesso",
             "carrinho": {
                 "itens": [item.to_dict() for item in carrinho_atualizado],
                 "total_itens": total_itens,
@@ -760,9 +764,9 @@ def sincronizar_carrinho():
         }), 200
         
     except Exception as e:
-        print(f"Erro ao sincronizar carrinho: {e}")
+        print(f"Erro ao adicionar ao carrinho: {e}")
         db.session.rollback()
-        return jsonify({"erro": "Falha ao sincronizar carrinho"}), 500
+        return jsonify({"erro": "Falha ao adicionar itens ao carrinho"}), 500
 
 # -----------------------------------------------------------------------------
 # GET /carrinho/<telefone> - BUSCAR CARRINHO ABANDONADO DO CLIENTE
