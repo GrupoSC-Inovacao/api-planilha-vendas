@@ -1549,13 +1549,14 @@ def relatorio_vendas():
 def ler_produtos():
     """
     Retorna lista completa de produtos com ID (para usar na venda).
+    Apenas produtos com estoque disponível (quantidade_estoque > 0).
     
     Exemplo: GET /catalogo
-    Resposta: [{"id": 63, "descricao_curta": "...", "preco": 225.36, ...}, ...]
+    Resposta: [{"id": 63, "descricao_curta": "...", "preco": 225.36, "quantidade_estoque": 12, ...}, ...]
     """
-    try:
-        # Busca todos os produtos do banco
-        produtos = Produto.query.all()        
+    try:        
+        produtos = Produto.query.filter(Produto.quantidade_estoque > 0).all()
+        
         return jsonify([p.to_dict() for p in produtos]), 200
     except Exception as e:
         print(f"Erro ao listar produtos: {e}")
