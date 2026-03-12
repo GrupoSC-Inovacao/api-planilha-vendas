@@ -349,6 +349,7 @@ class Oferta(db.Model):
     ean = db.Column(db.String(50))
     descricao_curta = db.Column(db.String(255))
     descricao_longa = db.Column(db.Text)
+    quantidade_estoque = db.Column(db.Integer)
     
     # Preços
     preco_original = db.Column(db.Numeric(10,2), nullable=False)
@@ -376,7 +377,7 @@ class Oferta(db.Model):
     # Relacionamento com produto
     produto = db.relationship('Produto', backref='ofertas')
     
-    # Verificação de validade   
+    # Verificação de validade      
     def esta_valida(self):
         """
         Verifica se a oferta está válida:
@@ -415,8 +416,9 @@ class Oferta(db.Model):
         - Se cnpj_cliente e ddd_regiao estiverem vazios → vale para todos
         - Se cnpj_cliente preenchido → só vale para aquele CNPJ
         - Se ddd_regiao preenchido → só vale para aquela região
-        - Se ambos preenchidos → precisa匹配 ambos
+        - Se ambos preenchidos → precisa combinar ambos
         """
+        
         # Se não tem segmentação, vale para todos
         if not self.cnpj_cliente and not self.ddd_regiao:
             return True
@@ -447,6 +449,7 @@ class Oferta(db.Model):
             'ean': self.ean,
             'descricao_curta': self.descricao_curta,
             'descricao_longa': self.descricao_longa,
+            'quantidade_estoque': self.quantidade_estoque,
             'preco_original': float(self.preco_original) if self.preco_original else None,
             'preco_oferta': float(self.preco_oferta) if self.preco_oferta else None,
             'desconto_percentual': float(self.desconto_percentual) if self.desconto_percentual else None,
@@ -1345,6 +1348,9 @@ def cadastrar_oferta():
         if not produto:
             return jsonify({"erro": f"Produto {produto_id} não encontrado"}), 404
         
+        # Capturar estoque atual do produto
+        quantidade_estoque = produto.quantidade_estoque if produto.quantidade_estoque is not None else 0
+        
         # Validar datas
         try:
             valida_ate = datetime.strptime(valida_ate_str, '%Y-%m-%d')
@@ -1388,6 +1394,7 @@ def cadastrar_oferta():
             ean=produto.ean,
             descricao_curta=produto.descricao_curta,
             descricao_longa=produto.descricao_longa,
+            quantidade_estoque=quantidade_estoque,
             preco_original=preco_original,
             preco_oferta=preco_oferta,
             desconto_percentual=desconto_percentual,
@@ -1421,7 +1428,7 @@ def cadastrar_oferta():
 def buscar_ofertas():
     """
     Busca ofertas filtrando por telefone, CNPJ e/ou DDD.
-    Valida automaticamente e exclui ofertas expiradas.
+    Valida automaticamente e exclui ofertas expiradas ou sem estoque.
     
     Query params:
     - telefone: 5511910589650 (opcional, usado para extrair DDD)
@@ -1429,6 +1436,7 @@ def buscar_ofertas():
     - ddd: 11 (opcional, extraído do telefone se não informado)
     - nome: promocao-natal (opcional, busca por nome)
     - ativas: true (opcional, default=true - só traz ofertas válidas)
+    - com_estoque: true (opcional, default=true - só traz ofertas com estoque > 0)
     
     Exemplos:
     GET /ofertas?telefone=5511910589650
@@ -1436,6 +1444,7 @@ def buscar_ofertas():
     GET /ofertas?ddd=11
     GET /ofertas?telefone=5511910589650&cnpj=33456789000132
     GET /ofertas?nome=promocao-natal
+    GET /ofertas?com_estoque=true
     """
     try:
         # Pegar parâmetros da query string
@@ -1444,6 +1453,7 @@ def buscar_ofertas():
         ddd = request.args.get('ddd', '').strip()
         nome = request.args.get('nome', '').strip()
         apenas_ativas = request.args.get('ativas', 'true').lower() == 'true'
+        apenas_com_estoque = request.args.get('com_estoque', 'true').lower() == 'true'  # ← NOVO!
         
         # Extrair DDD do telefone se não informado
         if not ddd and telefone and len(telefone) >= 11:
@@ -1468,6 +1478,7 @@ def buscar_ofertas():
         # Filtrar e atualizar status
         resultado = []
         ofertas_alteradas = []
+        ofertas_sem_estoque = 0
         
         for oferta in ofertas:
             # Atualizar status se estiver expirada
@@ -1476,6 +1487,11 @@ def buscar_ofertas():
             
             # Se quiser apenas ativas, pular as inválidas
             if apenas_ativas and not oferta.esta_valida():
+                continue
+            
+            # ← NOVO: Verificar estoque
+            if apenas_com_estoque and (oferta.quantidade_estoque is None or oferta.quantidade_estoque <= 0):
+                ofertas_sem_estoque += 1
                 continue
             
             # Verificar segmentação (CNPJ e DDD)
@@ -1490,9 +1506,23 @@ def buscar_ofertas():
         if ofertas_alteradas:
             db.session.commit()
             print(f"Status atualizado para 'expirada' em {len(ofertas_alteradas)} oferta(s)")
+        elif ofertas_alteradas:
+            db.session.rollback()
         
+        # Verificar se não sobrou nenhuma oferta após filtros
         if not resultado:
-            return jsonify({"mensagem": "Nenhuma oferta encontrada para este cliente/região"}), 201
+            # Determinar mensagem adequada
+            if ofertas_sem_estoque > 0 and apenas_com_estoque:
+                return jsonify({
+                    "mensagem": "Nenhuma oferta encontrada",
+                    "motivo": "Todas as ofertas estão sem estoque disponível",
+                    "ofertas_sem_estoque": ofertas_sem_estoque
+                }), 201
+            else:
+                return jsonify({
+                    "mensagem": "Nenhuma oferta encontrada",
+                    "motivo": "Nenhuma oferta disponível para este cliente/região"
+                }), 201
         
         return jsonify({
             "ofertas": resultado,
@@ -1501,7 +1531,8 @@ def buscar_ofertas():
                 "cnpj": cnpj,
                 "ddd": ddd,
                 "telefone": telefone,
-                "apenas_ativas": apenas_ativas
+                "apenas_ativas": apenas_ativas,
+                "apenas_com_estoque": apenas_com_estoque
             }
         }), 200
         
