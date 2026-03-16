@@ -8,9 +8,9 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from sqlalchemy import text
 import os
-
 import logging
 import sys
+import requests
 
 # Configurar logging para mostrar erros no console
 logging.basicConfig(
@@ -517,6 +517,44 @@ class Auth(db.Model):
             'cnpj': self.cnpj,
             'empresa': self.empresa,
             'date': self.date.strftime('%Y-%m-%d') if self.date else None            
+        }
+
+# -----------------------------------------------------------------------------
+# TABELA: consultas_bula (log de todas as consultas de bula)
+# -----------------------------------------------------------------------------
+class ConsultaBula(db.Model):
+    __tablename__ = 'consultas_bula'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    
+    # Dados do cliente
+    telefone = db.Column(db.String(20), nullable=False, index=True)
+    empresa = db.Column(db.String(255))
+    cnpj = db.Column(db.String(20), index=True)
+    
+    # Dados da consulta
+    pesquisa = db.Column(db.String(255), nullable=False)
+    dados_retornados = db.Column(db.Text)
+    status_consulta = db.Column(db.String(20), default='sucesso')
+    
+    # Metadados
+    data_consulta = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    ip_origem = db.Column(db.String(45))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Converte para JSON
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'telefone': self.telefone,
+            'empresa': self.empresa,
+            'cnpj': self.cnpj,
+            'pesquisa': self.pesquisa,
+            'dados_retornados': self.dados_retornados,
+            'status_consulta': self.status_consulta,
+            'data_consulta': self.data_consulta.strftime('%Y-%m-%d %H:%M:%S') if self.data_consulta else None,
+            'ip_origem': self.ip_origem,
+            'created_at': self.created_at.strftime('%Y-%m-%d %H:%M:%S') if self.created_at else None
         }
 
 # =============================================================================
@@ -2005,6 +2043,377 @@ def buscar_cliente_por_telefone():
     except Exception as e:
         print(f"Erro ao buscar cliente por telefone: {e}")
         return jsonify({"erro": "Falha ao buscar cliente"}), 500
+
+# -----------------------------------------------------------------------------
+# POST /bula - CONSULTAR BULA COMPLETA DE MEDICAMENTO (COM LOG AUTOMÁTICO)
+# -----------------------------------------------------------------------------
+@app.route('/bula', methods=['POST'])
+def consultar_bula():
+    """
+    Consulta a bula completa de um medicamento pelo nome via POST.
+    Body esperado:
+    {
+        "telefone": "5511910589650",
+        "empresa": "SC01",
+        "cnpj": "33456789000132",
+        "busca": "tylenol"
+    }
+    
+    Retorna a bula com indicações, posologia, contraindicações, etc.
+    Salva automaticamente o log da consulta na tabela consultas_bula.
+    """
+    try:
+        # Pega os dados JSON enviados na requisição
+        dados = request.get_json()
+        
+        if not dados:
+            return jsonify({"erro": "Corpo da requisição inválido"}), 400
+        
+        # Extrair e validar campos
+        telefone = str(dados.get("telefone", "")).strip()
+        empresa = str(dados.get("empresa", "")).strip() or None
+        cnpj = str(dados.get("cnpj", "")).strip() or None
+        busca = str(dados.get("busca", "")).strip()
+        
+        if not busca:
+            logger.warning(f"Tentativa de consulta de bula sem termo de busca")
+            return jsonify({"erro": "Campo 'busca' é obrigatório"}), 400
+        
+        # URL da API externa com bula completa
+        url = f"https://bula-api.vercel.app/api/bula/{busca}"
+        
+        # Faz a requisição para a API externa com timeout de 15 segundos
+        response = requests.get(url, timeout=15)
+        
+        # Variáveis para o log
+        status_consulta = 'sucesso'
+        dados_retornados = None
+        
+        # Se a API externa retornar 404
+        if response.status_code == 404:
+            logger.warning(f"Medicamento não encontrado: {busca}")
+            status_consulta = 'nao_encontrado'
+            # Salvar log mesmo em caso de não encontrado (se tiver telefone)
+            if telefone:
+                try:
+                    novo_log = ConsultaBula(
+                        telefone=telefone,
+                        empresa=empresa,
+                        cnpj=cnpj,
+                        pesquisa=busca,
+                        dados_retornados=None,
+                        status_consulta=status_consulta,
+                        ip_origem=request.remote_addr
+                    )
+                    db.session.add(novo_log)
+                    db.session.commit()
+                except Exception as log_error:
+                    logger.warning(f"Não foi possível salvar log: {log_error}")
+                    db.session.rollback()
+            return jsonify({
+                "erro": "Medicamento não encontrado na base de bulas",
+                "nome_pesquisado": busca
+            }), 404
+        
+        # Se houver erro na API externa
+        if response.status_code != 200:
+            logger.error(f"Erro na API externa para {busca}: {response.status_code}")
+            status_consulta = 'erro'
+            return jsonify({
+                "erro": "Erro ao comunicar com serviço externo",
+                "status_code": response.status_code,
+                "nome_pesquisado": busca
+            }), 503
+        
+        data = response.json()
+        
+        # Verificar se retornou dados válidos
+        if not data or not data.get('nome'):
+            logger.warning(f"Dados inválidos retornados para: {busca}")
+            status_consulta = 'nao_encontrado'
+            if telefone:
+                try:
+                    novo_log = ConsultaBula(
+                        telefone=telefone,
+                        empresa=empresa,
+                        cnpj=cnpj,
+                        pesquisa=busca,
+                        dados_retornados=None,
+                        status_consulta=status_consulta,
+                        ip_origem=request.remote_addr
+                    )
+                    db.session.add(novo_log)
+                    db.session.commit()
+                except Exception as log_error:
+                    logger.warning(f"Não foi possível salvar log: {log_error}")
+                    db.session.rollback()
+            return jsonify({
+                "erro": "Nenhum resultado encontrado",
+                "nome_pesquisado": busca
+            }), 404
+        
+        # Prepara os dados retornados para salvar no log (resumo em texto)
+        dados_retornados = f"Nome: {data.get('nome', '')} | Lab: {data.get('laboratorio', '')} | Indicações: {data.get('indicacoes', '')[:200]}..."
+        
+        # Monta a resposta completa da bula
+        resposta_dados = {  
+            "nome": data.get('nome', ''),
+            "registro_anvisa": data.get('registro', ''),
+            "laboratorio": data.get('laboratorio', ''),
+            "principio_ativo": data.get('principio_ativo', ''),
+            "classe_terapeutica": data.get('classe_terapeutica', ''),
+            "indicacoes": data.get('indicacoes', ''),
+            "posologia": data.get('posologia', ''),
+            "armazenamento": data.get('armazenamento', ''),
+            "contraindicacoes": data.get('contraindicacoes', ''),
+            "efeitos_colaterais": data.get('efeitos_colaterais', ''),
+            "superdosagem": data.get('superdosagem', ''),
+            "venda": data.get('venda', '')
+        }
+        
+        # Retorna sucesso com os dados completos da bula
+        logger.info(f"Bula consultada com sucesso: {busca}")
+        resposta = jsonify({
+            "status": "success",
+            "nome_pesquisado": busca,
+            "dados": resposta_dados
+        }), 200
+        
+        # =====================================================================
+        # SALVAMENTO AUTOMÁTICO DO LOG
+        # =====================================================================
+        if telefone:
+            try:
+                novo_log = ConsultaBula(
+                    telefone=telefone,
+                    empresa=empresa,
+                    cnpj=cnpj,
+                    pesquisa=busca,
+                    dados_retornados=dados_retornados,
+                    status_consulta=status_consulta,
+                    ip_origem=request.remote_addr
+                )
+                db.session.add(novo_log)
+                db.session.commit()
+                logger.debug(f"Log salvo: {busca} | Tel: {telefone}")
+            except Exception as log_error:
+                logger.warning(f"Não foi possível salvar log da consulta: {log_error}")
+                db.session.rollback()
+        
+        return resposta
+        
+    except requests.exceptions.Timeout:
+        logger.warning(f"Timeout ao consultar bula: {dados.get('busca', 'desconhecido') if dados else 'desconhecido'}")
+        return jsonify({
+            "erro": "Tempo esgotado ao consultar serviço externo",
+            "nome_pesquisado": dados.get('busca', '') if dados else ''
+        }), 504
+        
+    except requests.exceptions.ConnectionError:
+        logger.warning(f"Erro de conexão ao consultar bula: {dados.get('busca', 'desconhecido') if dados else 'desconhecido'}")
+        return jsonify({
+            "erro": "Erro de conexão com serviço externo",
+            "nome_pesquisado": dados.get('busca', '') if dados else ''
+        }), 503
+        
+    except Exception as e:
+        logger.error(f"Erro ao consultar bula: {dados.get('busca', 'desconhecido') if dados else 'desconhecido'} - {str(e)}")
+        return jsonify({
+            "erro": "Falha ao consultar bula",
+            "detalhe": str(e)
+        }), 500
+
+# -----------------------------------------------------------------------------
+# POST /consultas-bula/log - SALVAR LOG DE CONSULTA DE BULA
+# -----------------------------------------------------------------------------
+@app.route('/consultas-bula/log', methods=['POST'])
+def salvar_log_consulta_bula():
+    """
+    Salva o log de uma consulta de bula realizada por um usuário.
+    Body esperado:
+    {
+        "telefone": "5511910589650",
+        "empresa": "SC01",
+        "cnpj": "33456789000132",
+        "pesquisa": "tylenol",
+        "dados_retornados": "texto com os dados retornados da consulta",
+        "status_consulta": "sucesso"
+    }
+    """
+    try:
+        dados = request.get_json()
+        
+        if not dados:
+            return jsonify({"erro": "Corpo da requisição inválido"}), 400
+        
+        telefone = str(dados.get("telefone", "")).strip()
+        pesquisa = str(dados.get("pesquisa", "")).strip()
+        
+        if not telefone:
+            return jsonify({"erro": "telefone é obrigatório"}), 400
+        
+        if not pesquisa:
+            return jsonify({"erro": "pesquisa é obrigatório"}), 400
+        
+        empresa = str(dados.get("empresa", "")).strip() or None
+        cnpj = str(dados.get("cnpj", "")).strip() or None
+        dados_retornados = dados.get("dados_retornados", "")
+        status_consulta = str(dados.get("status_consulta", "sucesso")).strip()
+        ip_origem = request.remote_addr
+        
+        novo_log = ConsultaBula(
+            telefone=telefone,
+            empresa=empresa,
+            cnpj=cnpj,
+            pesquisa=pesquisa,
+            dados_retornados=dados_retornados,
+            status_consulta=status_consulta,
+            ip_origem=ip_origem
+        )
+        
+        db.session.add(novo_log)
+        db.session.commit()
+        
+        logger.info(f"Log de consulta salvo: {pesquisa} | Telefone: {telefone}")
+        
+        return jsonify({
+            "mensagem": "Log de consulta salvo com sucesso",
+            "consulta": novo_log.to_dict()
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"Erro ao salvar log de consulta: {str(e)}")
+        db.session.rollback()
+        return jsonify({
+            "erro": "Falha ao salvar log de consulta",
+            "detalhe": str(e)
+        }), 500
+
+# -----------------------------------------------------------------------------
+# GET /consultas-bula - BUSCAR LOGS DE CONSULTAS
+# -----------------------------------------------------------------------------
+@app.route('/consultas-bula', methods=['GET'])
+def buscar_logs_consultas_bula():
+    """
+    Busca logs de consultas de bula com filtros opcionais.
+    Query params: telefone, cnpj, pesquisa, status, data_inicio, data_fim, limite
+    """
+    try:
+        telefone = request.args.get('telefone', '').strip()
+        cnpj = request.args.get('cnpj', '').strip()
+        pesquisa = request.args.get('pesquisa', '').strip()
+        status = request.args.get('status', '').strip()
+        data_inicio = request.args.get('data_inicio', '').strip()
+        data_fim = request.args.get('data_fim', '').strip()
+        limite = request.args.get('limite', '100', type=int)
+        
+        query = ConsultaBula.query
+        
+        if telefone:
+            query = query.filter_by(telefone=telefone)
+        if cnpj:
+            query = query.filter_by(cnpj=cnpj)
+        if pesquisa:
+            query = query.filter(ConsultaBula.pesquisa.ilike(f'%{pesquisa}%'))
+        if status:
+            query = query.filter_by(status_consulta=status)
+        if data_inicio:
+            try:
+                data_inicio_dt = datetime.strptime(data_inicio, '%Y-%m-%d')
+                query = query.filter(ConsultaBula.data_consulta >= data_inicio_dt)
+            except:
+                return jsonify({"erro": "Formato de data_inicio inválido. Use YYYY-MM-DD"}), 400
+        if data_fim:
+            try:
+                data_fim_dt = datetime.strptime(data_fim, '%Y-%m-%d')
+                data_fim_dt = data_fim_dt + timedelta(days=1)
+                query = query.filter(ConsultaBula.data_consulta < data_fim_dt)
+            except:
+                return jsonify({"erro": "Formato de data_fim inválido. Use YYYY-MM-DD"}), 400
+        
+        query = query.order_by(ConsultaBula.data_consulta.desc()).limit(limite)
+        consultas = query.all()
+        
+        if not consultas:
+            return jsonify({"mensagem": "Nenhuma consulta encontrada"}), 201
+        
+        return jsonify({
+            "consultas": [consulta.to_dict() for consulta in consultas],
+            "total_encontrado": len(consultas),
+            "filtros_aplicados": {
+                "telefone": telefone, "cnpj": cnpj, "pesquisa": pesquisa,
+                "status": status, "data_inicio": data_inicio,
+                "data_fim": data_fim, "limite": limite
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar logs de consultas: {str(e)}")
+        return jsonify({
+            "erro": "Falha ao buscar logs de consultas",
+            "detalhe": str(e)
+        }), 500
+
+# -----------------------------------------------------------------------------
+# DELETE /consultas-bula - EXCLUIR LOGS DE CONSULTAS
+# -----------------------------------------------------------------------------
+@app.route('/consultas-bula', methods=['DELETE'])
+def excluir_logs_consultas_bula():
+    """
+    Exclui logs de consultas com filtros.
+    Query params: telefone, cnpj, id, mais_antigas_que (pelo menos um obrigatório)
+    """
+    try:
+        telefone = request.args.get('telefone', '').strip()
+        cnpj = request.args.get('cnpj', '').strip()
+        consulta_id = request.args.get('id', '').strip()
+        mais_antigas_que = request.args.get('mais_antigas_que', '').strip()
+        
+        if not telefone and not cnpj and not consulta_id and not mais_antigas_que:
+            return jsonify({"erro": "Informe pelo menos um filtro: telefone, cnpj, id ou mais_antigas_que"}), 400
+        
+        query = ConsultaBula.query
+        
+        if telefone:
+            query = query.filter_by(telefone=telefone)
+        if cnpj:
+            query = query.filter_by(cnpj=cnpj)
+        if consulta_id:
+            try:
+                query = query.filter_by(id=int(consulta_id))
+            except:
+                return jsonify({"erro": "ID deve ser um número inteiro"}), 400
+        if mais_antigas_que:
+            try:
+                data_limite = datetime.strptime(mais_antigas_que, '%Y-%m-%d')
+                query = query.filter(ConsultaBula.data_consulta < data_limite)
+            except:
+                return jsonify({"erro": "Formato de mais_antigas_que inválido. Use YYYY-MM-DD"}), 400
+        
+        consultas = query.all()
+        
+        if not consultas:
+            return jsonify({"mensagem": "Nenhuma consulta encontrada para excluir"}), 200
+        
+        for consulta in consultas:
+            db.session.delete(consulta)
+        
+        db.session.commit()
+        
+        logger.info(f"{len(consultas)} log(s) de consulta excluído(s)")
+        
+        return jsonify({
+            "mensagem": "Log(s) de consulta excluído(s) com sucesso",
+            "registros_excluidos": len(consultas)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Erro ao excluir logs de consultas: {str(e)}")
+        db.session.rollback()
+        return jsonify({
+            "erro": "Falha ao excluir logs de consultas",
+            "detalhe": str(e)
+        }), 500
 
 # =============================================================================
 # INICIALIZAÇÃO DO BANCO DE DADOS
