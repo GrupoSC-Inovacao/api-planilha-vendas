@@ -2374,118 +2374,171 @@ def consultar_bula():
         if not busca:
             return jsonify({"erro": "Campo 'busca' é obrigatório"}), 400
         
-        # Obter token de autenticação
-        token = get_pharmadb_token()
-        if not token:
-            return jsonify({
-                "erro": "Erro de autenticação com PharmaDB",
-                "sugestao": "Verifique se PHARMADB_API_KEY está configurada"
-            }), 503
-        
-        # Mapeamento de nomes comerciais para busca
-        mapeamento = {
-            'tylenol': 'paracetamol',
-            'dorflex': 'dorflex',
-            'neosaldina': 'neosaldina',
-            'buscopan': 'buscopan',
-            'novalgina': 'novalgina'
-        }
-        
-        termos_busca = [busca.lower()]
-        if busca.lower() in mapeamento:
-            termos_busca.append(mapeamento[busca.lower()])
-        
-        # Headers com autenticação
-        headers = {
-            'Authorization': f'Bearer {token}',
-            'Content-Type': 'application/json'
-        }
-        
         status_consulta = 'sucesso'
         dados_retornados = None
-        medicamento_encontrado = None
-        termo_usado = None
+        medicamento = None
+        fonte_usada = 'local'
         
-        # Tentar cada variação do nome
-        for termo in termos_busca:
-            try:
-                # Buscar bulas por nome
-                url = f"https://api.pharmadb.com.br/v1/bulas/busca?q={termo}&page=1&per_page=5"
-                response = requests.get(url, headers=headers, timeout=15)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    items = data.get('items', [])
-                    
-                    if items and len(items) > 0:
-                        # Pega a primeira bula encontrada
-                        bula_resumo = items[0]
-                        bula_id = bula_resumo.get('id')
-                        
-                        # Busca bula completa
-                        url_completa = f"https://api.pharmadb.com.br/v1/bulas/{bula_id}"
-                        response_completa = requests.get(url_completa, headers=headers, timeout=15)
-                        
-                        if response_completa.status_code == 200:
-                            bula_completa = response_completa.json()
-                            medicamento_encontrado = bula_completa
-                            termo_usado = termo
-                            logger.info(f"Bula encontrada: {bula_completa.get('produto', {}).get('nome', termo)}")
-                            break
-                            
-            except Exception as e:
-                logger.warning(f"Erro ao buscar '{termo}': {str(e)}")
-                continue
+        # PASSO 1: Buscar no banco local (cache)
+        medicamento = BulaMedicamento.query.filter(
+            db.or_(
+                BulaMedicamento.nome.ilike(f'%{busca}%'),
+                BulaMedicamento.nome_comercial.ilike(f'%{busca}%'),
+                BulaMedicamento.principio_ativo.ilike(f'%{busca}%')
+            )
+        ).order_by(BulaMedicamento.ultima_atualizacao.desc()).first()
         
-        if not medicamento_encontrado:
-            logger.warning(f"Medicamento não encontrado: {busca}")
-            status_consulta = 'nao_encontrado'
+        if medicamento:
+            logger.info(f"Medicamento encontrado no cache local: {busca}")
+            dados_retornados = f"Nome: {medicamento.nome} | Lab: {medicamento.laboratorio}"
+        else:
+            # PASSO 2: Consultar PharmaDB (API externa)
+            logger.info(f"Medicamento não encontrado no cache. Consultando PharmaDB: {busca}")
+            fonte_usada = 'pharmadb'
             
-            if telefone:
+            # Obter token de autenticação
+            token = get_pharmadb_token()
+            if not token:
+                return jsonify({
+                    "erro": "Erro de autenticação com PharmaDB",
+                    "sugestao": "Verifique se PHARMADB_API_KEY está configurada"
+                }), 503
+            
+            # Mapeamento de nomes comerciais para busca
+            mapeamento = {
+                'tylenol': 'paracetamol',
+                'dorflex': 'dorflex',
+                'neosaldina': 'neosaldina',
+                'buscopan': 'buscopan',
+                'novalgina': 'novalgina'
+            }
+            
+            termos_busca = [busca.lower()]
+            if busca.lower() in mapeamento:
+                termos_busca.append(mapeamento[busca.lower()])
+            
+            # Headers com autenticação
+            headers = {
+                'Authorization': f'Bearer {token}',
+                'Content-Type': 'application/json'
+            }
+            
+            medicamento_encontrado = None
+            termo_usado = None
+            
+            # Tentar cada variação do nome
+            for termo in termos_busca:
                 try:
-                    log = ConsultaBula(
-                        telefone=telefone, empresa=empresa, cnpj=cnpj,
-                        pesquisa=busca, dados_retornados=None,
-                        status_consulta=status_consulta, ip_origem=request.remote_addr
-                    )
-                    db.session.add(log)
-                    db.session.commit()
-                except:
-                    db.session.rollback()
+                    # Buscar bulas por nome
+                    url = f"https://api.pharmadb.com.br/v1/bulas/busca?q={termo}&page=1&per_page=5"
+                    response = requests.get(url, headers=headers, timeout=15)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        items = data.get('items', [])
+                        
+                        if items and len(items) > 0:
+                            # Pega a primeira bula encontrada
+                            bula_resumo = items[0]
+                            bula_id = bula_resumo.get('id')
+                            
+                            # Busca bula completa
+                            url_completa = f"https://api.pharmadb.com.br/v1/bulas/{bula_id}"
+                            response_completa = requests.get(url_completa, headers=headers, timeout=15)
+                            
+                            if response_completa.status_code == 200:
+                                bula_completa = response_completa.json()
+                                medicamento_encontrado = bula_completa
+                                termo_usado = termo
+                                logger.info(f"Bula encontrada: {bula_completa.get('produto', {}).get('nome', termo)}")
+                                break
+                                
+                except Exception as e:
+                    logger.warning(f"Erro ao buscar '{termo}': {str(e)}")
+                    continue
             
-            return jsonify({
-                "erro": "Medicamento não encontrado na PharmaDB",
-                "nome_pesquisado": busca,
-                "sugestao": "Tente buscar pelo nome genérico"
-            }), 404
+            if not medicamento_encontrado:
+                logger.warning(f"Medicamento não encontrado na PharmaDB: {busca}")
+                status_consulta = 'nao_encontrado'
+                
+                if telefone:
+                    try:
+                        log = ConsultaBula(
+                            telefone=telefone, empresa=empresa, cnpj=cnpj,
+                            pesquisa=busca, dados_retornados=None,
+                            status_consulta=status_consulta, ip_origem=request.remote_addr
+                        )
+                        db.session.add(log)
+                        db.session.commit()
+                    except:
+                        db.session.rollback()
+                
+                return jsonify({
+                    "erro": "Medicamento não encontrado na PharmaDB",
+                    "nome_pesquisado": busca,
+                    "sugestao": "Tente buscar pelo nome genérico"
+                }), 404
+            
+            # Extrair dados da bula
+            produto = medicamento_encontrado.get('produto', {})
+            
+            # PASSO 3: Salvar no cache local (bula_medicamento)
+            try:
+                medicamento_cache = BulaMedicamento(
+                    nome=produto.get('nome', '').upper(),
+                    nome_comercial=produto.get('nome', '').upper(),
+                    principio_ativo=', '.join(produto.get('principios_ativos', [])).upper(),
+                    laboratorio=produto.get('laboratorio'),
+                    registro_anvisa=produto.get('registro_anvisa'),
+                    indicacoes=medicamento_encontrado.get('texto_indicacoes'),
+                    contraindicacoes=medicamento_encontrado.get('texto_contraindicacoes'),
+                    posologia=medicamento_encontrado.get('texto_posologia'),
+                    armazenamento=None,
+                    efeitos_colaterais=medicamento_encontrado.get('texto_reacoes_adversas'),
+                    advertencias=None,
+                    composicao=None,
+                    fonte='pharmadb'
+                )
+                db.session.add(medicamento_cache)
+                db.session.commit()
+                logger.info(f"Medicamento salvo no cache local: {produto.get('nome')}")
+                
+                # Recarregar do banco
+                medicamento = BulaMedicamento.query.filter_by(nome=produto.get('nome', '').upper()).first()
+                
+            except Exception as e:
+                logger.error(f"Erro ao salvar no cache: {str(e)}")
+                db.session.rollback()
+                medicamento = None
+            
+            dados_retornados = f"Nome: {produto.get('nome', '')} | Lab: {produto.get('laboratorio', '')}"
         
-        # Extrair dados da bula
-        produto = medicamento_encontrado.get('produto', {})
-        dados_retornados = f"Nome: {produto.get('nome', '')} | Lab: {produto.get('laboratorio', '')}"
+        # PREPARAR RESPOSTA
+        if medicamento:
+            resposta_dados = medicamento.to_dict()
+        else:
+            resposta_dados = {
+                "nome": produto.get('nome', ''),
+                "registro_anvisa": produto.get('registro_anvisa', ''),
+                "laboratorio": produto.get('laboratorio', ''),
+                "principio_ativo": ', '.join(produto.get('principios_ativos', [])),
+                "indicacoes": medicamento_encontrado.get('texto_indicacoes', ''),
+                "contraindicacoes": medicamento_encontrado.get('texto_contraindicacoes', ''),
+                "posologia": medicamento_encontrado.get('texto_posologia', ''),
+                "reacoes_adversas": medicamento_encontrado.get('texto_reacoes_adversas', ''),
+                "interacoes": medicamento_encontrado.get('texto_interacoes', ''),
+                "extraido_em": medicamento_encontrado.get('extraido_em', '')
+            }
         
-        # Monta resposta completa
-        resposta_dados = {
-            "nome": produto.get('nome', ''),
-            "registro_anvisa": produto.get('registro_anvisa', ''),
-            "laboratorio": produto.get('laboratorio', ''),
-            "principio_ativo": ', '.join(produto.get('principios_ativos', [])),
-            "indicacoes": medicamento_encontrado.get('texto_indicacoes', ''),
-            "contraindicacoes": medicamento_encontrado.get('texto_contraindicacoes', ''),
-            "posologia": medicamento_encontrado.get('texto_posologia', ''),
-            "reacoes_adversas": medicamento_encontrado.get('texto_reacoes_adversas', ''),
-            "interacoes": medicamento_encontrado.get('texto_interacoes', ''),
-            "extraido_em": medicamento_encontrado.get('extraido_em', '')
-        }
-        
-        logger.info(f"Bula consultada com sucesso: {busca} (fonte: PharmaDB)")
+        logger.info(f"Bula consultada com sucesso: {busca} (fonte: {fonte_usada})")
         resposta = jsonify({
             "status": "success",
             "nome_pesquisado": busca,
-            "fonte": "pharmadb",
+            "fonte": fonte_usada,
             "dados": resposta_dados
         }), 200
         
-        # Salvar log
+        # SALVAR LOG DA CONSULTA
         if telefone:
             try:
                 log = ConsultaBula(
