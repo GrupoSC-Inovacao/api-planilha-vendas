@@ -12,6 +12,10 @@ import logging
 import sys
 import requests
 
+# Variáveis para cache do token JWT
+_pharmadb_token = None
+_pharmadb_token_expires_at = None
+
 # Configurar logging para mostrar erros no console
 logging.basicConfig(
     level=logging.INFO,
@@ -613,6 +617,55 @@ class BulaMedicamento(db.Model):
             'fonte': self.fonte,
             'ultima_atualizacao': self.ultima_atualizacao.strftime('%Y-%m-%d %H:%M:%S') if self.ultima_atualizacao else None
         }
+
+# -----------------------------------------------------------------------------
+# FUNÇÕES AUXILIARES - PHARMADB AUTH
+# -----------------------------------------------------------------------------
+def get_pharmadb_token():
+    """
+    Obtém ou renova o token JWT da PharmaDB.
+    Usa cache para evitar requisições desnecessárias.
+    """
+    global _pharmadb_token, _pharmadb_token_expires_at
+    
+    # Verifica se token existe e ainda é válido (com margem de 5 minutos)
+    if _pharmadb_token and _pharmadb_token_expires_at:
+        if datetime.utcnow() < _pharmadb_token_expires_at - timedelta(minutes=5):
+            logger.debug("Usando token JWT em cache")
+            return _pharmadb_token
+    
+    # Obtém API Key das variáveis de ambiente
+    api_key = os.environ.get('PHARMADB_API_KEY', '')
+    
+    if not api_key:
+        logger.error("PHARMADB_API_KEY não configurada nas variáveis de ambiente")
+        return None
+    
+    try:
+        # Requisição para obter token
+        response = requests.post(
+            'https://api.pharmadb.com.br/auth/token',
+            headers={'x-api-key': api_key},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            _pharmadb_token = data.get('access_token')
+            expires_in = data.get('expires_in', 3600)  # 3600 segundos = 60 minutos
+            
+            # Calcula tempo de expiração (com margem de segurança de 5 minutos)
+            _pharmadb_token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in - 300)
+            
+            logger.info(f"Token JWT obtido com sucesso. Expira em {expires_in}s")
+            return _pharmadb_token
+        else:
+            logger.error(f"Erro ao obter token PharmaDB: {response.status_code} - {response.text}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Exceção ao obter token PharmaDB: {str(e)}")
+        return None
 
 # =============================================================================
 # ROTAS DA API - ENDPOINTS
@@ -2294,12 +2347,12 @@ def excluir_logs_consultas_bula():
         }), 500
 
 # -----------------------------------------------------------------------------
-# POST /bula - CONSULTAR BULA (CACHE LOCAL + PHARMADB)
+# POST /bula - CONSULTAR BULA COMPLETA (PHARMADB COM AUTH)
 # -----------------------------------------------------------------------------
 @app.route('/bula', methods=['POST'])
 def consultar_bula():
     """
-    Consulta bula com cache local + PharmaDB.
+    Consulta a bula completa de um medicamento via PharmaDB.
     Body esperado:
     {
         "telefone": "5511910589650",
@@ -2307,11 +2360,6 @@ def consultar_bula():
         "cnpj": "33456789000132",
         "busca": "tylenol"
     }
-    
-    Fluxo:
-    1. Busca no banco local (bula_medicamento)
-    2. Se não encontrar, consulta PharmaDB e salva no banco
-    3. Salva log na tabela consultas_bula
     """
     try:
         dados = request.get_json()
@@ -2326,127 +2374,118 @@ def consultar_bula():
         if not busca:
             return jsonify({"erro": "Campo 'busca' é obrigatório"}), 400
         
+        # Obter token de autenticação
+        token = get_pharmadb_token()
+        if not token:
+            return jsonify({
+                "erro": "Erro de autenticação com PharmaDB",
+                "sugestao": "Verifique se PHARMADB_API_KEY está configurada"
+            }), 503
+        
+        # Mapeamento de nomes comerciais para busca
+        mapeamento = {
+            'tylenol': 'paracetamol',
+            'dorflex': 'dorflex',
+            'neosaldina': 'neosaldina',
+            'buscopan': 'buscopan',
+            'novalgina': 'novalgina'
+        }
+        
+        termos_busca = [busca.lower()]
+        if busca.lower() in mapeamento:
+            termos_busca.append(mapeamento[busca.lower()])
+        
+        # Headers com autenticação
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Content-Type': 'application/json'
+        }
+        
         status_consulta = 'sucesso'
         dados_retornados = None
-        medicamento = None
-        fonte_usada = 'local'
+        medicamento_encontrado = None
+        termo_usado = None
         
-        # PASSO 1: Buscar no banco local (cache)
-        medicamento = BulaMedicamento.query.filter(
-            db.or_(
-                BulaMedicamento.nome.ilike(f'%{busca}%'),
-                BulaMedicamento.nome_comercial.ilike(f'%{busca}%'),
-                BulaMedicamento.principio_ativo.ilike(f'%{busca}%')
-            )
-        ).order_by(BulaMedicamento.ultima_atualizacao.desc()).first()
-        
-        if medicamento:
-            logger.info(f"Medicamento encontrado no cache local: {busca}")
-            dados_retornados = f"Nome: {medicamento.nome} | Lab: {medicamento.laboratorio}"
-        else:
-            # PASSO 2: Consultar PharmaDB (API externa)
-            logger.info(f"Medicamento não encontrado no cache. Consultando PharmaDB: {busca}")
-            fonte_usada = 'pharmadb'
-            
-            # Mapeamento de nomes comerciais para genéricos
-            mapeamento = {
-                'tylenol': 'paracetamol',
-                'dorflex': 'dipirona',
-                'neosaldina': 'dipirona',
-                'buscopan': 'escopolamina',
-                'novalgina': 'dipirona'
-            }
-            
-            termos_busca = [busca.lower()]
-            if busca.lower() in mapeamento:
-                termos_busca.append(mapeamento[busca.lower()])
-            
-            # Tentar cada variação do nome
-            url_base = "https://pharmadb.com.br/v1/produtos/busca"
-            dados_pharmadb = None
-            termo_usado = None
-            
-            for termo in termos_busca:
-                try:
-                    params = {'q': termo}
-                    response = requests.get(url_base, params=params, timeout=15)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        if data and len(data) > 0:
-                            dados_pharmadb = data[0]
-                            termo_usado = termo
-                            break
-                except Exception as e:
-                    logger.warning(f"Erro ao buscar '{termo}' na PharmaDB: {str(e)}")
-                    continue
-            
-            if not dados_pharmadb:
-                logger.warning(f"Medicamento não encontrado na PharmaDB: {busca}")
-                status_consulta = 'nao_encontrado'
-                
-                # Salvar log
-                if telefone:
-                    try:
-                        log = ConsultaBula(
-                            telefone=telefone, empresa=empresa, cnpj=cnpj,
-                            pesquisa=busca, dados_retornados=None,
-                            status_consulta=status_consulta, ip_origem=request.remote_addr
-                        )
-                        db.session.add(log)
-                        db.session.commit()
-                    except:
-                        db.session.rollback()
-                
-                return jsonify({
-                    "erro": "Medicamento não encontrado",
-                    "nome_pesquisado": busca,
-                    "sugestao": "Tente buscar pelo nome genérico"
-                }), 404
-            
-            # Extrair dados da PharmaDB
-            medicamento_data = {
-                'nome': dados_pharmadb.get('nome', busca).upper(),
-                'nome_comercial': dados_pharmadb.get('nome_comercial', '').upper(),
-                'principio_ativo': dados_pharmadb.get('principio_ativo', '').upper(),
-                'laboratorio': dados_pharmadb.get('laboratorio'),
-                'registro_anvisa': dados_pharmadb.get('registro'),
-                'classe_terapeutica': dados_pharmadb.get('classe_terapeutica'),
-                'indicacoes': dados_pharmadb.get('indicacoes'),
-                'contraindicacoes': dados_pharmadb.get('contraindicacoes'),
-                'posologia': dados_pharmadb.get('posologia'),
-                'armazenamento': dados_pharmadb.get('armazenamento'),
-                'efeitos_colaterais': dados_pharmadb.get('efeitos_colaterais'),
-                'advertencias': dados_pharmadb.get('advertencias'),
-                'composicao': dados_pharmadb.get('composicao')
-            }
-            
-            # Salvar no banco local
+        # Tentar cada variação do nome
+        for termo in termos_busca:
             try:
-                medicamento = BulaMedicamento(**medicamento_data)
-                db.session.add(medicamento)
-                db.session.commit()
-                logger.info(f"Medicamento salvo no cache local: {medicamento_data['nome']}")
+                # Buscar bulas por nome
+                url = f"https://api.pharmadb.com.br/v1/bulas/busca?q={termo}&page=1&per_page=5"
+                response = requests.get(url, headers=headers, timeout=15)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    items = data.get('items', [])
+                    
+                    if items and len(items) > 0:
+                        # Pega a primeira bula encontrada
+                        bula_resumo = items[0]
+                        bula_id = bula_resumo.get('id')
+                        
+                        # Busca bula completa
+                        url_completa = f"https://api.pharmadb.com.br/v1/bulas/{bula_id}"
+                        response_completa = requests.get(url_completa, headers=headers, timeout=15)
+                        
+                        if response_completa.status_code == 200:
+                            bula_completa = response_completa.json()
+                            medicamento_encontrado = bula_completa
+                            termo_usado = termo
+                            logger.info(f"Bula encontrada: {bula_completa.get('produto', {}).get('nome', termo)}")
+                            break
+                            
             except Exception as e:
-                logger.error(f"Erro ao salvar medicamento no cache: {str(e)}")
-                db.session.rollback()
-                # Tenta buscar novamente (pode ter sido inserido por outra requisição)
-                medicamento = BulaMedicamento.query.filter_by(nome=medicamento_data['nome']).first()
+                logger.warning(f"Erro ao buscar '{termo}': {str(e)}")
+                continue
+        
+        if not medicamento_encontrado:
+            logger.warning(f"Medicamento não encontrado: {busca}")
+            status_consulta = 'nao_encontrado'
             
-            dados_retornados = f"Nome: {medicamento_data['nome']} | Lab: {medicamento_data['laboratorio']}"
+            if telefone:
+                try:
+                    log = ConsultaBula(
+                        telefone=telefone, empresa=empresa, cnpj=cnpj,
+                        pesquisa=busca, dados_retornados=None,
+                        status_consulta=status_consulta, ip_origem=request.remote_addr
+                    )
+                    db.session.add(log)
+                    db.session.commit()
+                except:
+                    db.session.rollback()
+            
+            return jsonify({
+                "erro": "Medicamento não encontrado na PharmaDB",
+                "nome_pesquisado": busca,
+                "sugestao": "Tente buscar pelo nome genérico"
+            }), 404
         
-        # PREPARAR RESPOSTA
-        resposta_dados = medicamento.to_dict() if medicamento else {}
+        # Extrair dados da bula
+        produto = medicamento_encontrado.get('produto', {})
+        dados_retornados = f"Nome: {produto.get('nome', '')} | Lab: {produto.get('laboratorio', '')}"
         
-        logger.info(f"Bula consultada com sucesso: {busca} (fonte: {fonte_usada})")
+        # Monta resposta completa
+        resposta_dados = {
+            "nome": produto.get('nome', ''),
+            "registro_anvisa": produto.get('registro_anvisa', ''),
+            "laboratorio": produto.get('laboratorio', ''),
+            "principio_ativo": ', '.join(produto.get('principios_ativos', [])),
+            "indicacoes": medicamento_encontrado.get('texto_indicacoes', ''),
+            "contraindicacoes": medicamento_encontrado.get('texto_contraindicacoes', ''),
+            "posologia": medicamento_encontrado.get('texto_posologia', ''),
+            "reacoes_adversas": medicamento_encontrado.get('texto_reacoes_adversas', ''),
+            "interacoes": medicamento_encontrado.get('texto_interacoes', ''),
+            "extraido_em": medicamento_encontrado.get('extraido_em', '')
+        }
+        
+        logger.info(f"Bula consultada com sucesso: {busca} (fonte: PharmaDB)")
         resposta = jsonify({
             "status": "success",
             "nome_pesquisado": busca,
-            "fonte": fonte_usada,
+            "fonte": "pharmadb",
             "dados": resposta_dados
         }), 200
         
-        # SALVAR LOG DA CONSULTA
+        # Salvar log
         if telefone:
             try:
                 log = ConsultaBula(
@@ -2469,16 +2508,9 @@ def consultar_bula():
     except requests.exceptions.Timeout:
         logger.warning(f"Timeout ao consultar bula: {dados.get('busca', 'desconhecido') if dados else 'desconhecido'}")
         return jsonify({
-            "erro": "Tempo esgotado ao consultar serviço externo",
+            "erro": "Tempo esgotado ao consultar PharmaDB",
             "nome_pesquisado": dados.get('busca', '') if dados else ''
         }), 504
-        
-    except requests.exceptions.ConnectionError:
-        logger.warning(f"Erro de conexão ao consultar bula: {dados.get('busca', 'desconhecido') if dados else 'desconhecido'}")
-        return jsonify({
-            "erro": "Erro de conexão com serviço externo",
-            "nome_pesquisado": dados.get('busca', '') if dados else ''
-        }), 503
         
     except Exception as e:
         logger.error(f"Erro ao consultar bula: {dados.get('busca', 'desconhecido') if dados else 'desconhecido'} - {str(e)}")
