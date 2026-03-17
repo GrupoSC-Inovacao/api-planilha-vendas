@@ -12,7 +12,7 @@ import logging
 import sys
 import requests
 
-# Variáveis para cache do token JWT
+# Variáveis para cache do token JWT da PharmaDB
 _pharmadb_token = None
 _pharmadb_token_expires_at = None
 
@@ -2347,7 +2347,7 @@ def excluir_logs_consultas_bula():
         }), 500
 
 # -----------------------------------------------------------------------------
-# POST /bula - CONSULTAR BULA COMPLETA (PHARMADB COM AUTH)
+# POST /bula - CONSULTAR BULA COMPLETA (PHARMADB COM AUTH + CACHE LOCAL)
 # -----------------------------------------------------------------------------
 @app.route('/bula', methods=['POST'])
 def consultar_bula():
