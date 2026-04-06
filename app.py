@@ -12,11 +12,9 @@ import logging
 import sys
 import requests
 
-# Variáveis para cache do token JWT da PharmaDB
 _pharmadb_token = None
 _pharmadb_token_expires_at = None
 
-# Configurar logging para mostrar erros no console
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -32,14 +30,11 @@ app = Flask(__name__)
 # =============================================================================
 # CONFIGURAÇÃO DO BANCO DE DADOS
 # =============================================================================
-# Pega a DATABASE_URL e corrige o prefixo
 database_url = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
 
-# Corrige postgres:// para postgresql://
 if database_url and database_url.startswith('postgres://'):
     database_url = database_url.replace('postgres://', 'postgresql://', 1)
 
-# Força o uso do driver psycopg (versão 3) em vez de psycopg2
 if database_url.startswith('postgresql://') and not database_url.startswith('postgresql+psycopg://'):
     database_url = database_url.replace('postgresql://', 'postgresql+psycopg://', 1)
 
@@ -57,10 +52,8 @@ db = SQLAlchemy(app)
 class Venda(db.Model):
     __tablename__ = 'vendas'
     
-    # Campos da tabela
     id = db.Column(db.Integer, primary_key=True)
     
-    # Dados do cliente no momento da venda
     cliente_id = db.Column(db.Integer, db.ForeignKey('clientes.id'), nullable=False)
     empresa = db.Column(db.String(255), nullable=False)
     cnpj = db.Column(db.String(20), nullable=False)
@@ -68,18 +61,15 @@ class Venda(db.Model):
     razao_social = db.Column(db.String(255))
     email_cliente = db.Column(db.String(255))
     
-    # Dados da venda
     data_venda = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     valor_total = db.Column(db.Numeric(10,2), nullable=False)
     quantidade_itens = db.Column(db.Integer, default=0)
     observacoes = db.Column(db.Text)
     
-    # Relacionamento: uma venda tem vários itens
     itens = db.relationship('VendaItem', backref='venda', lazy=True, cascade='all, delete-orphan')
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)  
     
-    # Converte para JSON
     def to_dict(self):
         return {
             'id': self.id,
@@ -104,11 +94,9 @@ class VendaItem(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     
-    # Chaves estrangeiras: relaciona com venda e produto
     venda_id = db.Column(db.Integer, db.ForeignKey('vendas.id'), nullable=False)
     produto_id = db.Column(db.Integer, db.ForeignKey('produtos.id'), nullable=False)
     
-    # Dados do produto no momento da venda
     cod_sap = db.Column(db.String(100))
     ean = db.Column(db.String(50))
     descricao_curta = db.Column(db.String(255))
@@ -116,12 +104,10 @@ class VendaItem(db.Model):
     quantidade = db.Column(db.Integer, nullable=False)
     subtotal = db.Column(db.Numeric(10,2), nullable=False)
     
-    # Relacionamento com Produto
     produto = db.relationship('Produto', backref='venda_itens')
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # Converte para JSON
     def to_dict(self):
         return {
             'id': self.id,
@@ -143,12 +129,10 @@ class CarrinhoAbandonado(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     
-    # Dados do cliente
     telefone = db.Column(db.String(20), nullable=False, index=True)
     empresa = db.Column(db.String(255)) 
     cnpj = db.Column(db.String(20))
     
-    # Dados do produto
     produto_id = db.Column(db.Integer, db.ForeignKey('produtos.id'), nullable=False)
     cod_sap = db.Column(db.String(100))
     ean = db.Column(db.String(50))
@@ -157,12 +141,10 @@ class CarrinhoAbandonado(db.Model):
     quantidade = db.Column(db.Integer, nullable=False, default=1)
     subtotal = db.Column(db.Numeric(10,2), nullable=False)
     
-    # Metadados
     #session_id = db.Column(db.String(100))
     adicionado_em = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # Relacionamento com produto
     produto = db.relationship('Produto', backref='carrinho_itens')
     
     def to_dict(self):
@@ -190,27 +172,22 @@ class Cotacao(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     
-    # Código único da cotação (gerado pelo bot)
     codigo = db.Column(db.String(50), nullable=False, index=True, unique=True)
     
-    # Dados do cliente
     telefone = db.Column(db.String(20), nullable=False, index=True)
     empresa = db.Column(db.String(255))
     cnpj = db.Column(db.String(20))
     
-    # Dados da cotação
     data_cotacao = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     valida_ate = db.Column(db.DateTime)
     observacoes = db.Column(db.Text)
     status = db.Column(db.String(20), default='ativa')
     
-    # Relacionamento com itens
     itens = db.relationship('CotacaoItem', backref='cotacao', lazy=True, cascade='all, delete-orphan')
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # Verificação de validade    
     def esta_valida(self):
         """
         Verifica se a cotação está válida:
@@ -219,15 +196,12 @@ class Cotacao(db.Model):
         
         Retorna: bool
         """
-        # Se não está com status 'ativa', já está inválida
         if self.status != 'ativa':
             return False
         
-        # Se tem data de validade e já passou, está expirada
         if self.valida_ate and datetime.utcnow() > self.valida_ate:
             return False
         
-        # Caso contrário, está válida
         return True
     
     def atualizar_status_se_expirada(self):
@@ -240,8 +214,6 @@ class Cotacao(db.Model):
             self.status = 'expirada'
             return True
         return False
-
-    # Conversão para JSON
 
     def to_dict(self):
         return {
@@ -269,7 +241,6 @@ class CotacaoItem(db.Model):
     cotacao_id = db.Column(db.Integer, db.ForeignKey('cotacoes.id'), nullable=False)
     produto_id = db.Column(db.Integer, db.ForeignKey('produtos.id'), nullable=False)
     
-    # Dados do produto
     cod_sap = db.Column(db.String(100))
     ean = db.Column(db.String(50))
     descricao_curta = db.Column(db.String(255))
@@ -277,7 +248,6 @@ class CotacaoItem(db.Model):
     quantidade = db.Column(db.Integer, nullable=False)
     subtotal = db.Column(db.Numeric(10,2), nullable=False)
     
-    # Relacionamento com produto
     produto = db.relationship('Produto', backref='cotacao_itens')
     
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -303,7 +273,6 @@ class Produto(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     
-    # Campos do produto
     forma = db.Column(db.String(100))
     tipo = db.Column(db.String(100))
     fornecedor = db.Column(db.String(255))
@@ -317,7 +286,6 @@ class Produto(db.Model):
     quantidade_estoque = db.Column(db.Integer)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # Converte para JSON
     def to_dict(self):
         return {
             'id': self.id,
@@ -342,46 +310,36 @@ class Oferta(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     
-    # Identificação da oferta
     nome = db.Column(db.String(255), nullable=False, index=True)
     
-    # Vínculo com produto
     produto_id = db.Column(db.Integer, db.ForeignKey('produtos.id'), nullable=False)
     
-    # Dados do produto (snapshot no momento da oferta)
     cod_sap = db.Column(db.String(100))
     ean = db.Column(db.String(50))
     descricao_curta = db.Column(db.String(255))
     descricao_longa = db.Column(db.Text)
     quantidade_estoque = db.Column(db.Integer)
     
-    # Preços
     preco_original = db.Column(db.Numeric(10,2), nullable=False)
     preco_oferta = db.Column(db.Numeric(10,2), nullable=False)
     desconto_percentual = db.Column(db.Numeric(5,2))
     
-    # Imagem da oferta (URL construída a partir do nome)
     nome_imagem = db.Column(db.String(255), nullable=False)
     url_imagem = db.Column(db.String(500), nullable=False)
     
-    # Segmentação (opcional - se vazio, vale para todos)
     cnpj_cliente = db.Column(db.String(20), index=True)
     ddd_regiao = db.Column(db.String(2), index=True)
     
-    # Validade
     data_inicio = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     valida_ate = db.Column(db.DateTime, nullable=False)
     status = db.Column(db.String(20), default='ativa')
     
-    # Metadados
     observacoes = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # Relacionamento com produto
     produto = db.relationship('Produto', backref='ofertas')
     
-    # Verificação de validade      
     def esta_valida(self):
         """
         Verifica se a oferta está válida:
@@ -423,18 +381,15 @@ class Oferta(db.Model):
         - Se ambos preenchidos → precisa combinar ambos
         """
         
-        # Se não tem segmentação, vale para todos
         if not self.cnpj_cliente and not self.ddd_regiao:
             return True
         
-        # Verifica CNPJ
         if self.cnpj_cliente and cnpj:
             if self.cnpj_cliente != cnpj:
                 return False
         elif self.cnpj_cliente and not cnpj:
             return False
         
-        # Verifica DDD
         if self.ddd_regiao and ddd:
             if self.ddd_regiao != ddd:
                 return False
@@ -443,7 +398,6 @@ class Oferta(db.Model):
         
         return True
     
-    # Conversão para JSON    
     def to_dict(self):
         return {
             'id': self.id,
@@ -482,10 +436,8 @@ class Cliente(db.Model):
     email = db.Column(db.String(255))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # Garante que não tenha cliente duplicado com mesmo EMPRESA + CNPJ
     __table_args__ = (db.UniqueConstraint('empresa', 'cnpj', name='uq_empresa_cnpj'),)
     
-    # Converte para JSON
     def to_dict(self):
         return {
             'id': self.id,
@@ -510,10 +462,8 @@ class Auth(db.Model):
     date = db.Column(db.Date, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # Garante um registro único por number + data (evita duplicatas no mesmo dia)
     __table_args__ = (db.UniqueConstraint('number', 'date', name='uq_number_date'),)
     
-    # Converte para JSON
     def to_dict(self):
         return {
             'number': self.number,
@@ -531,22 +481,18 @@ class ConsultaBula(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     
-    # Dados do cliente
     telefone = db.Column(db.String(20), nullable=False, index=True)
     empresa = db.Column(db.String(255))
     cnpj = db.Column(db.String(20), index=True)
     
-    # Dados da consulta
     pesquisa = db.Column(db.String(255), nullable=False)
     dados_retornados = db.Column(db.Text)
     status_consulta = db.Column(db.String(20), default='sucesso')
     
-    # Metadados
     data_consulta = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     ip_origem = db.Column(db.String(45))
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # Converte para JSON
     def to_dict(self):
         return {
             'id': self.id,
@@ -569,17 +515,14 @@ class BulaMedicamento(db.Model):
     
     id = db.Column(db.Integer, primary_key=True)
     
-    # Dados principais
     nome = db.Column(db.String(255), nullable=False, index=True)
     nome_comercial = db.Column(db.String(255))
     principio_ativo = db.Column(db.String(255))
     
-    # Dados da PharmaDB
     laboratorio = db.Column(db.String(255))
     registro_anvisa = db.Column(db.String(50))
     classe_terapeutica = db.Column(db.String(255))
     
-    # Texto completo da bula
     indicacoes = db.Column(db.Text)
     contraindicacoes = db.Column(db.Text)
     posologia = db.Column(db.Text)
@@ -588,13 +531,11 @@ class BulaMedicamento(db.Model):
     advertencias = db.Column(db.Text)
     composicao = db.Column(db.Text)
     
-    # Metadados
     data_consulta = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     fonte = db.Column(db.String(50), default='pharmadb')
     ultima_atualizacao = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # Garante que não tenha duplicatas (nome + principio ativo)
     __table_args__ = (db.UniqueConstraint('nome', 'principio_ativo', name='uq_nome_principio'),)
     
     def to_dict(self):
@@ -628,13 +569,11 @@ def get_pharmadb_token():
     """
     global _pharmadb_token, _pharmadb_token_expires_at
     
-    # Verifica se token existe e ainda é válido (com margem de 5 minutos)
     if _pharmadb_token and _pharmadb_token_expires_at:
         if datetime.utcnow() < _pharmadb_token_expires_at - timedelta(minutes=5):
             logger.debug("Usando token JWT em cache")
             return _pharmadb_token
     
-    # Obtém API Key das variáveis de ambiente
     api_key = os.environ.get('PHARMADB_API_KEY', '')
     
     if not api_key:
@@ -642,7 +581,6 @@ def get_pharmadb_token():
         return None
     
     try:
-        # Requisição para obter token
         response = requests.post(
             'https://api.pharmadb.com.br/auth/token',
             headers={'x-api-key': api_key},
@@ -654,7 +592,6 @@ def get_pharmadb_token():
             _pharmadb_token = data.get('access_token')
             expires_in = data.get('expires_in', 3600)  # 3600 segundos = 60 minutos
             
-            # Calcula tempo de expiração (com margem de segurança de 5 minutos)
             _pharmadb_token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in - 300)
             
             logger.info(f"Token JWT obtido com sucesso. Expira em {expires_in}s")
@@ -691,34 +628,28 @@ def salvar_venda():
     }
     """
     try:
-        # Pega os dados JSON enviados na requisição
         dados = request.get_json()
         if not dados:
             return jsonify({"erro": "Corpo da requisição inválido"}), 400
         
-        # Extrai e valida dados do cliente
         cnpj = str(dados.get("cnpj", "")).strip()
         empresa = str(dados.get("empresa", "")).strip()
         
         if not cnpj or not empresa:
             return jsonify({"erro": "CNPJ e empresa são obrigatórios"}), 400
         
-        # Busca o cliente no banco pelo CNPJ + empresa
         cliente = Cliente.query.filter_by(cnpj=cnpj, empresa=empresa).first()
         
         if not cliente:
             return jsonify({"erro": "Cliente não encontrado"}), 404
         
-        # Extrai lista de itens da venda
         itens = dados.get("itens", [])
         if not itens:
             return jsonify({"erro": "Pelo menos um item é obrigatório"}), 400
         
-        # Variáveis para calcular o total e armazenar os itens
         valor_total = 0
         venda_itens = []
         
-        # Loop para processar cada item da venda
         for item in itens:
             produto_id = item.get("produto_id")
             quantidade = item.get("quantidade", 1)
@@ -726,17 +657,14 @@ def salvar_venda():
             if not produto_id:
                 return jsonify({"erro": "produto_id é obrigatório para cada item"}), 400
             
-            # Busca o produto pelo ID
             produto = Produto.query.get(produto_id)
             if not produto:
                 return jsonify({"erro": f"Produto {produto_id} não encontrado"}), 404
             
-            # Calcula subtotal: preço × quantidade
             preco_unitario = float(produto.preco) if produto.preco else 0
             subtotal = preco_unitario * quantidade
             valor_total += subtotal
             
-            # Cria o objeto VendaItem com os dados do produto (snapshot)
             venda_item = VendaItem(
                 produto_id=produto.id,
                 cod_sap=produto.cod_sap,
@@ -748,11 +676,9 @@ def salvar_venda():
             )
             venda_itens.append(venda_item)
             
-            # Atualiza estoque do produto
             if produto.quantidade_estoque is not None:
                 produto.quantidade_estoque -= quantidade
         
-        # Cria o registro da venda
         nova_venda = Venda(
             cliente_id=cliente.id,
             empresa=cliente.empresa,
@@ -766,14 +692,11 @@ def salvar_venda():
             observacoes=dados.get("observacoes", "")
         )
         
-        # Associa os itens à venda
         nova_venda.itens = venda_itens
         
-        # Salva tudo no banco de dados
         db.session.add(nova_venda)
         db.session.commit()
         
-        # Retorna sucesso com os dados da venda criada
         return jsonify({
             "mensagem": "Venda salva com sucesso",
             "venda": nova_venda.to_dict()
@@ -814,7 +737,6 @@ def adicionar_ao_carrinho():
         if not dados:
             return jsonify({"erro": "Corpo da requisição inválido"}), 400
         
-        # Identificador do cliente
         telefone = str(dados.get("telefone", "")).strip()
         empresa = str(dados.get("empresa", "")).strip()
         cnpj = str(dados.get("cnpj", "")).strip()
@@ -822,11 +744,9 @@ def adicionar_ao_carrinho():
         if not telefone:
             return jsonify({"erro": "Telefone é obrigatório"}), 400
         
-        # Itens a serem adicionados/acumulados
         itens_enviados = dados.get("itens", [])
         
         if not itens_enviados:
-            # Se não veio nenhum item, apenas retorna o carrinho atual
             carrinho_atual = CarrinhoAbandonado.query.filter_by(telefone=telefone).all()
             valor_total = sum(float(item.subtotal) for item in carrinho_atual)
             total_itens = sum(item.quantidade for item in carrinho_atual)
@@ -841,13 +761,10 @@ def adicionar_ao_carrinho():
                 }
             }), 200
         
-        # Buscar itens atuais no banco
         itens_no_banco = CarrinhoAbandonado.query.filter_by(telefone=telefone).all()
         
-        # Criar dicionário para busca rápida (produto_id -> item)
         banco_dict = {item.produto_id: item for item in itens_no_banco}
         
-        # Processar cada item enviado
         for item_enviado in itens_enviados:
             produto_id = item_enviado.get("produto_id")
             quantidade_enviada = item_enviado.get("quantidade", 1)
@@ -855,15 +772,12 @@ def adicionar_ao_carrinho():
             if not produto_id:
                 continue
             
-            # Buscar produto para pegar dados completos
             produto = Produto.query.get(produto_id)
             if not produto:
                 continue
             
-            # Calcular preço unitário
             preco_unitario = float(produto.preco) if produto.preco else 0
             
-            # Verificar se já existe no carrinho
             if produto_id in banco_dict:              
                 item_existente = banco_dict[produto_id]
                 nova_quantidade = item_existente.quantidade + quantidade_enviada
@@ -874,10 +788,8 @@ def adicionar_ao_carrinho():
                 item_existente.cnpj = cnpj if cnpj else item_existente.cnpj
                 item_existente.updated_at = datetime.utcnow()
                 
-                # Atualiza dicionário para próxima iteração
                 banco_dict[produto_id] = item_existente
             else:
-                # ✅ ADICIONAR: novo item no carrinho
                 subtotal = preco_unitario * quantidade_enviada
                 novo_item = CarrinhoAbandonado(
                     telefone=telefone,
@@ -893,13 +805,10 @@ def adicionar_ao_carrinho():
                 )
                 db.session.add(novo_item)
                 
-                # Adiciona ao dicionário para futuras atualizações
                 banco_dict[produto_id] = novo_item
         
-        # Salvar todas as alterações
         db.session.commit()
         
-        # Retornar carrinho atualizado
         carrinho_atualizado = CarrinhoAbandonado.query.filter_by(telefone=telefone).all()
         valor_total = sum(float(item.subtotal) for item in carrinho_atualizado)
         total_itens = sum(item.quantidade for item in carrinho_atualizado)
@@ -933,13 +842,11 @@ def buscar_carrinho_abandonado(telefone):
         if not telefone:
             return jsonify({"erro": "Telefone é obrigatório"}), 400
         
-        # Buscar todos os itens do carrinho abandonado do cliente
         carrinho = CarrinhoAbandonado.query.filter_by(telefone=telefone).order_by(CarrinhoAbandonado.adicionado_em.desc()).all()
         
         if not carrinho:
             return jsonify({"mensagem": "Carrinho vazio"}), 201
         
-        # Calcular totais
         valor_total = sum(float(item.subtotal) for item in carrinho)
         total_itens = sum(item.quantidade for item in carrinho)
         
@@ -989,19 +896,16 @@ def remover_do_carrinho():
         if not dados:
             return jsonify({"erro": "Corpo da requisição inválido"}), 400
         
-        # Identificador do cliente
         telefone = str(dados.get("telefone", "")).strip()
         
         if not telefone:
             return jsonify({"erro": "Telefone é obrigatório"}), 400
         
-        # Itens a serem removidos/subtraídos
         itens_a_remover = dados.get("itens", [])
         
         if not itens_a_remover:
             return jsonify({"erro": "É necessário informar pelo menos um item para remover"}), 400
         
-        # Buscar itens atuais no carrinho do cliente
         itens_no_carrinho = CarrinhoAbandonado.query.filter_by(telefone=telefone).all()
         
         if not itens_no_carrinho:
@@ -1015,15 +919,12 @@ def remover_do_carrinho():
                 }
             }), 200
         
-        # Criar dicionário para busca rápida (produto_id -> item)
         carrinho_dict = {item.produto_id: item for item in itens_no_carrinho}
         
-        # Controlar o que foi processado
         itens_removidos = []
         itens_atualizados = []
         itens_nao_encontrados = []
         
-        # Processar cada item da solicitação de remoção
         for item_remover in itens_a_remover:
             produto_id = item_remover.get("produto_id")
             quantidade_a_remover = item_remover.get("quantidade", 1)
@@ -1031,7 +932,6 @@ def remover_do_carrinho():
             if not produto_id or quantidade_a_remover <= 0:
                 continue
             
-            # Verificar se o produto existe no carrinho
             if produto_id not in carrinho_dict:
                 itens_nao_encontrados.append({
                     "produto_id": produto_id,
@@ -1042,11 +942,9 @@ def remover_do_carrinho():
             item_no_carrinho = carrinho_dict[produto_id]
             quantidade_atual = item_no_carrinho.quantidade
             
-            # Calcular nova quantidade
             nova_quantidade = quantidade_atual - quantidade_a_remover
             
             if nova_quantidade > 0:
-                # SUBTRAIR: mantém o produto com quantidade reduzida
                 item_no_carrinho.quantidade = nova_quantidade
                 preco_unitario = float(item_no_carrinho.preco_unitario) if item_no_carrinho.preco_unitario else 0
                 item_no_carrinho.subtotal = preco_unitario * nova_quantidade
@@ -1059,7 +957,6 @@ def remover_do_carrinho():
                     "quantidade_atual": nova_quantidade
                 })
             else:
-                # REMOVER: quantidade zerou ou ficou negativa, exclui do carrinho
                 db.session.delete(item_no_carrinho)
                 
                 itens_removidos.append({
@@ -1069,10 +966,8 @@ def remover_do_carrinho():
                     "mensagem": "Produto removido do carrinho"
                 })
         
-        # Salvar alterações no banco
         db.session.commit()
         
-        # Retornar carrinho atualizado
         carrinho_atualizado = CarrinhoAbandonado.query.filter_by(telefone=telefone).all()
         valor_total = sum(float(item.subtotal) for item in carrinho_atualizado)
         total_itens = sum(item.quantidade for item in carrinho_atualizado)
@@ -1117,7 +1012,6 @@ def limpar_carrinho_abandonado(telefone):
         if not telefone:
             return jsonify({"erro": "Telefone é obrigatório"}), 400
         
-        # Buscar e deletar itens
         carrinho = CarrinhoAbandonado.query.filter_by(telefone=telefone).all()
         
         if not carrinho:
@@ -1167,23 +1061,19 @@ def sincronizar_cotacao():
         if not dados:
             return jsonify({"erro": "Corpo da requisição inválido"}), 400
         
-        # Dados obrigatórios
         telefone = str(dados.get("telefone", "")).strip()
         codigo = str(dados.get("codigo", "")).strip()
         
         if not telefone or not codigo:
             return jsonify({"erro": "Telefone e código são obrigatórios"}), 400
         
-        # Dados opcionais do cliente
         empresa = str(dados.get("empresa", "")).strip()
         cnpj = str(dados.get("cnpj", "")).strip()
         observacoes = dados.get("observacoes", "")
         valida_ate_str = dados.get("valida_ate")
         
-        # Itens da cotação
         itens_enviados = dados.get("itens", [])
         
-        # Validar data de validade (se informada)
         valida_ate = None
         if valida_ate_str:
             try:
@@ -1191,11 +1081,9 @@ def sincronizar_cotacao():
             except:
                 return jsonify({"erro": "Formato de valida_ate inválido. Use YYYY-MM-DD"}), 400
         
-        # Buscar cotação existente pelo código
         cotacao = Cotacao.query.filter_by(codigo=codigo).first()
         
         if not cotacao:
-            # CRIAR nova cotação
             cotacao = Cotacao(
                 codigo=codigo,
                 telefone=telefone,
@@ -1210,7 +1098,6 @@ def sincronizar_cotacao():
             db.session.flush()
             acao = "Cotação criada"
         else:
-            # ATUALIZAR dados da cotação existente
             cotacao.telefone = telefone
             cotacao.empresa = empresa if empresa else cotacao.empresa
             cotacao.cnpj = cnpj if cnpj else cotacao.cnpj
@@ -1219,7 +1106,6 @@ def sincronizar_cotacao():
             cotacao.updated_at = datetime.utcnow()
             acao = "Cotação atualizada"
         
-        # Se não veio itens, apenas retorna a cotação (sem alterar itens)
         if not itens_enviados:
             db.session.commit()
             return jsonify({
@@ -1227,16 +1113,12 @@ def sincronizar_cotacao():
                 "cotacao": cotacao.to_dict()
             }), 200
         
-        # Buscar itens atuais da cotação no banco
         itens_no_banco = CotacaoItem.query.filter_by(cotacao_id=cotacao.id).all()
         
-        # Criar dicionário para comparação rápida (produto_id -> item)
         banco_dict = {item.produto_id: item for item in itens_no_banco}
         
-        # Lista de produtos que devem permanecer na cotação
         produtos_finais = set()
         
-        # Processar cada item enviado
         for item_enviado in itens_enviados:
             produto_id = item_enviado.get("produto_id")
             quantidade = item_enviado.get("quantidade", 1)
@@ -1246,24 +1128,19 @@ def sincronizar_cotacao():
             
             produtos_finais.add(produto_id)
             
-            # Buscar produto para pegar dados completos
             produto = Produto.query.get(produto_id)
             if not produto:
                 continue
             
-            # Calcular valores
             preco_unitario = float(produto.preco) if produto.preco else 0
             subtotal = preco_unitario * quantidade
             
-            # Verificar se já existe na cotação
             if produto_id in banco_dict:
-                # ATUALIZAR item existente
                 item_existente = banco_dict[produto_id]
                 item_existente.quantidade = quantidade
                 item_existente.subtotal = subtotal
                 item_existente.preco_unitario = preco_unitario
             else:
-                # ADICIONAR novo item
                 novo_item = CotacaoItem(
                     cotacao_id=cotacao.id,
                     produto_id=produto.id,
@@ -1276,18 +1153,14 @@ def sincronizar_cotacao():
                 )
                 db.session.add(novo_item)
         
-        # REMOVER itens que estão na cotação mas não foram enviados
         for produto_id, item in banco_dict.items():
             if produto_id not in produtos_finais:
                 db.session.delete(item)
         
-        # Salvar todas as alterações
         db.session.commit()
         
-        # Recarregar a cotação com os itens atualizados
         cotacao_atualizada = Cotacao.query.get(cotacao.id)
         
-        # Calcular totais
         valor_total = sum(float(item.subtotal) for item in cotacao_atualizada.itens)
         total_itens = sum(item.quantidade for item in cotacao_atualizada.itens)
         
@@ -1329,17 +1202,14 @@ def buscar_cotacao():
     GET /cotacoes?telefone=5511910589650&valida=true
     """
     try:
-        # Pegar parâmetros da query string
         telefone = request.args.get('telefone', '').strip()
         codigo = request.args.get('codigo', '').strip()
         status = request.args.get('status', '').strip()
-        apenas_validas = request.args.get('valida', '').lower() == 'true'  # ← NOVO!
+        apenas_validas = request.args.get('valida', '').lower() == 'true'
         
-        # Pelo menos um filtro é obrigatório
         if not telefone and not codigo and not status and not apenas_validas:
             return jsonify({"erro": "Informe pelo menos: telefone, código, status ou valida"}), 400
         
-        # Construir query dinâmica
         query = Cotacao.query
         
         if telefone:
@@ -1349,20 +1219,16 @@ def buscar_cotacao():
         if status:
             query = query.filter_by(status=status)
         
-        # Ordenar por data decrescente
         query = query.order_by(Cotacao.data_cotacao.desc())
         
-        # Executar consulta
         cotacoes = query.all()
         
-        # Filtrar apenas válidas se solicitado (após buscar do banco)
         if apenas_validas:
             cotacoes = [cot for cot in cotacoes if cot.esta_valida()]
         
         if not cotacoes:
             return jsonify({"mensagem": "Nenhuma cotação encontrada"}), 201
         
-        # Formatar resposta com verificação e atualização de validade
         resultado = []
         cotacoes_alteradas = []
         
@@ -1370,18 +1236,15 @@ def buscar_cotacao():
             if cot.atualizar_status_se_expirada():
                 cotacoes_alteradas.append(cot)
             
-            # Calcular totais
             valor_total = sum(float(item.subtotal) for item in cot.itens)
             total_itens = sum(item.quantidade for item in cot.itens)
             
-            # Montar resposta
             resultado.append({
                 **cot.to_dict(),
                 "total_itens": total_itens,
                 "valor_total": valor_total
             })
         
-        #Salvar alterações de status no banco (apenas se alguma mudou)
         if cotacoes_alteradas:
             db.session.commit()
             print(f"Status atualizado para 'expirada' em {len(cotacoes_alteradas)} cotação(ões)")
@@ -1417,11 +1280,9 @@ def excluir_cotacao():
         telefone = request.args.get('telefone', '').strip()
         codigo = request.args.get('codigo', '').strip()
         
-        # Pelo menos um filtro é obrigatório
         if not telefone and not codigo:
             return jsonify({"erro": "Informe pelo menos: telefone ou código"}), 400
         
-        # Construir query dinâmica
         query = Cotacao.query
         
         if telefone:
@@ -1429,13 +1290,11 @@ def excluir_cotacao():
         if codigo:
             query = query.filter_by(codigo=codigo)
         
-        # Buscar cotações para excluir
         cotacoes = query.all()
         
         if not cotacoes:
             return jsonify({"mensagem": "Nenhuma cotação encontrada para excluir"}), 200
         
-        # Excluir itens primeiro
         for cot in cotacoes:
             for item in cot.itens:
                 db.session.delete(item)
@@ -1479,7 +1338,6 @@ def cadastrar_oferta():
         if not dados:
             return jsonify({"erro": "Corpo da requisição inválido"}), 400
         
-        # Campos obrigatórios
         nome = str(dados.get("nome", "")).strip()
         produto_id = dados.get("produto_id")
         preco_oferta = dados.get("preco_oferta")
@@ -1491,15 +1349,12 @@ def cadastrar_oferta():
                 "erro": "Campos obrigatórios: nome, produto_id, preco_oferta, nome_imagem, valida_ate"
             }), 400
         
-        # Buscar produto para pegar dados completos
         produto = Produto.query.get(produto_id)
         if not produto:
             return jsonify({"erro": f"Produto {produto_id} não encontrado"}), 404
         
-        # Capturar estoque atual do produto
         quantidade_estoque = produto.quantidade_estoque if produto.quantidade_estoque is not None else 0
         
-        # Validar datas
         try:
             valida_ate = datetime.strptime(valida_ate_str, '%Y-%m-%d')
         except:
@@ -1512,29 +1367,24 @@ def cadastrar_oferta():
             except:
                 return jsonify({"erro": "Formato de data_inicio inválido. Use YYYY-MM-DD"}), 400
         
-        # Calcular desconto percentual
         preco_original = float(produto.preco) if produto.preco else 0
         desconto_percentual = 0
         if preco_original > 0:
             desconto_percentual = ((preco_original - float(preco_oferta)) / preco_original) * 100
         
-        # Construir URL da imagem
         base_url = request.url_root.rstrip('/')
         url_imagem = f"{base_url}/imagens-arquivo/{nome_imagem}"
         
-        # Campos opcionais
         cnpj_cliente = str(dados.get("cnpj_cliente", "")).strip() or None
         ddd_regiao = str(dados.get("ddd_regiao", "")).strip() or None
         observacoes = dados.get("observacoes", "")
         
-        # Verificar se já existe oferta com mesmo nome
         oferta_existente = Oferta.query.filter_by(nome=nome).first()
         if oferta_existente:
             return jsonify({
                 "erro": f"Já existe uma oferta com o nome '{nome}'. Use um nome único."
             }), 409
         
-        # Criar nova oferta
         nova_oferta = Oferta(
             nome=nome,
             produto_id=produto.id,
@@ -1595,71 +1445,56 @@ def buscar_ofertas():
     GET /ofertas?com_estoque=true
     """
     try:
-        # Pegar parâmetros da query string
         telefone = request.args.get('telefone', '').strip()
         cnpj = request.args.get('cnpj', '').strip()
         ddd = request.args.get('ddd', '').strip()
         nome = request.args.get('nome', '').strip()
         apenas_ativas = request.args.get('ativas', 'true').lower() == 'true'
-        apenas_com_estoque = request.args.get('com_estoque', 'true').lower() == 'true'  # ← NOVO!
+        apenas_com_estoque = request.args.get('com_estoque', 'true').lower() == 'true'
         
-        # Extrair DDD do telefone se não informado
         if not ddd and telefone and len(telefone) >= 11:
             ddd = telefone[2:4]
         
-        # Construir query dinâmica
         query = Oferta.query
         
-        # Filtro por nome (se informado)
         if nome:
             query = query.filter(Oferta.nome.ilike(f'%{nome}%'))
         
-        # Ordenar por data de validade
         query = query.order_by(Oferta.valida_ate.desc())
         
-        # Executar consulta
         ofertas = query.all()
         
         if not ofertas:
             return jsonify({"mensagem": "Nenhuma oferta encontrada"}), 201
         
-        # Filtrar e atualizar status
         resultado = []
         ofertas_alteradas = []
         ofertas_sem_estoque = 0
         
         for oferta in ofertas:
-            # Atualizar status se estiver expirada
             if oferta.atualizar_status_se_expirada():
                 ofertas_alteradas.append(oferta)
             
-            # Se quiser apenas ativas, pular as inválidas
             if apenas_ativas and not oferta.esta_valida():
                 continue
             
-            # ← NOVO: Verificar estoque
             if apenas_com_estoque and (oferta.quantidade_estoque is None or oferta.quantidade_estoque <= 0):
                 ofertas_sem_estoque += 1
                 continue
             
-            # Verificar segmentação (CNPJ e DDD)
             if cnpj or ddd:
                 if not oferta.eh_para_cliente(cnpj=cnpj, ddd=ddd):
                     continue
             
-            # Adicionar ao resultado
             resultado.append(oferta.to_dict())
         
-        # Salvar alterações de status no banco
         if ofertas_alteradas:
             db.session.commit()
             print(f"Status atualizado para 'expirada' em {len(ofertas_alteradas)} oferta(s)")
         elif ofertas_alteradas:
             db.session.rollback()
         
-        # Verificar se não sobrou nenhuma oferta após filtros
         if not resultado:
-            # Determinar mensagem adequada
             if ofertas_sem_estoque > 0 and apenas_com_estoque:
                 return jsonify({
                     "mensagem": "Nenhuma oferta encontrada",
@@ -1709,11 +1544,9 @@ def excluir_oferta():
         nome = request.args.get('nome', '').strip()
         oferta_id = request.args.get('id', '')
         
-        # Pelo menos um filtro é obrigatório
         if not nome and not oferta_id:
             return jsonify({"erro": "Informe pelo menos: nome ou id da oferta"}), 400
         
-        # Construir query
         query = Oferta.query
         
         if nome:
@@ -1725,13 +1558,11 @@ def excluir_oferta():
             except:
                 return jsonify({"erro": "ID deve ser um número inteiro"}), 400
         
-        # Buscar oferta(s)
         ofertas = query.all()
         
         if not ofertas:
             return jsonify({"mensagem": "Nenhuma oferta encontrada para excluir"}), 200
         
-        # Excluir ofertas
         for oferta in ofertas:
             db.session.delete(oferta)
         
@@ -1762,7 +1593,6 @@ def buscar_ultima_venda(cnpj):
         if not cnpj:
             return jsonify({"erro": "CNPJ é obrigatório"}), 400
         
-        # Busca vendas do CNPJ, ordena por data decrescente e pega a primeira
         venda = Venda.query.filter_by(cnpj=cnpj).order_by(Venda.data_venda.desc()).first()
         
         if not venda:
@@ -1788,7 +1618,6 @@ def buscar_todas_vendas_cliente(cnpj):
         if not cnpj:
             return jsonify({"erro": "CNPJ é obrigatório"}), 400
         
-        # Busca todas as vendas do CNPJ, da mais recente para a mais antiga
         vendas = Venda.query.filter_by(cnpj=cnpj).order_by(Venda.data_venda.desc()).all()
         
         if not vendas:
@@ -1817,15 +1646,12 @@ def relatorio_vendas():
     GET /vendas/relatorio?cnpj=33456789000132
     """
     try:
-        # Pega parâmetros da URL (query strings)
         data_inicio = request.args.get('data_inicio')
         data_fim = request.args.get('data_fim')
         cnpj = request.args.get('cnpj')
         
-        # Começa com todas as vendas
         query = Venda.query
         
-        # Aplica filtro de data inicial (se informado)
         if data_inicio:
             try:
                 data_inicio_dt = datetime.strptime(data_inicio, '%Y-%m-%d')
@@ -1833,25 +1659,20 @@ def relatorio_vendas():
             except:
                 return jsonify({"erro": "Formato de data_inicio inválido. Use YYYY-MM-DD"}), 400
         
-        # Aplica filtro de data final (se informado)
         if data_fim:
             try:
                 data_fim_dt = datetime.strptime(data_fim, '%Y-%m-%d')
-        # Inclui todo o dia final (até 23:59:59)            
                 data_fim_dt = data_fim_dt + timedelta(days=1)
                 query = query.filter(Venda.data_venda < data_fim_dt)
             except:
                 return jsonify({"erro": "Formato de data_fim inválido. Use YYYY-MM-DD"}), 400
         
-        # Aplica filtro de CNPJ (se informado)
         if cnpj:
             query = query.filter_by(cnpj=cnpj)
         
-        # Ordena por data decrescente e executa a consulta
         query = query.order_by(Venda.data_venda.desc())
         vendas = query.all()
         
-        # Calcula totais para o resumo
         total_vendas = len(vendas)
         valor_total = sum(float(v.valor_total) for v in vendas if v.valor_total)
         
@@ -1912,7 +1733,6 @@ def buscar_cliente():
         if not empresa or not cnpj:
             return jsonify({"erro": "EMPRESA e CNPJ são obrigatórios"}), 400
 
-        # Busca cliente com EXACT MATCH em empresa e cnpj
         cliente = Cliente.query.filter_by(empresa=empresa, cnpj=cnpj).first()
 
         if not cliente:
@@ -1934,17 +1754,15 @@ def listar_imagens_por_nome(nome):
     
     Exemplo: GET /imagens/produto1 → retorna URLs de produto1.jpg, produto1_2.png, etc.
     """
-    # Proteção contra acesso a arquivos fora da pasta
     if '..' in nome or nome.startswith('/'):
         return jsonify({"erro": "Acesso negado"}), 403
 
     base_url = request.url_root.rstrip('/')
-    pasta = '.'  # Pasta atual
+    pasta = '.'
     extensoes_validas = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
     arquivos_encontrados = []
 
     try:
-        # Varre todos os arquivos da pasta
         for arquivo in os.listdir(pasta):
             caminho_completo = os.path.join(pasta, arquivo)
             if not os.path.isfile(caminho_completo):
@@ -1952,7 +1770,6 @@ def listar_imagens_por_nome(nome):
             nome_arquivo, ext = os.path.splitext(arquivo)
             if ext.lower() not in extensoes_validas:
                 continue
-            # Compara ignorando maiúsculas/minúsculas
             if nome_arquivo.lower().startswith(nome.lower()):
                 url_completa = f"{base_url}/imagens-arquivo/{arquivo}"
                 arquivos_encontrados.append(url_completa)
@@ -1971,11 +1788,9 @@ def servir_arquivo_imagem(nome):
     
     Exemplo: GET /imagens-arquivo/produto1.jpg → retorna a imagem
     """
-    # Proteção contra acesso a arquivos fora da pasta
     if '..' in nome or nome.startswith('/'):
         return jsonify({"erro": "Acesso negado"}), 403
     try:
-        # Envia o arquivo da pasta atual
         return send_from_directory('.', nome)
     except FileNotFoundError:
         return jsonify({"erro": "Imagem não encontrada"}), 404
@@ -2003,7 +1818,6 @@ def consultar_auth():
 
         data_atual = datetime.now().date()
         
-        # Busca registro com number + data EXATAMENTE de hoje
         registro = Auth.query.filter_by(number=number, date=data_atual).first()
 
         if not registro:
@@ -2039,7 +1853,6 @@ def salvar_auth():
         if not number or not auth or not date_str:
             return jsonify({"erro": "Todos os campos são obrigatórios: number, auth, cnpj,empresa, date"}), 400
         
-        # Converte string "YYYY-MM-DD" para objeto date do Python
         try:
             date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
         except:
@@ -2053,18 +1866,15 @@ def salvar_auth():
             'date': date_str
         }
         
-        # Busca se já existe registro com esse number + data
         registro = Auth.query.filter_by(number=number, date=date_obj).first()
         
         if registro:
-            # ATUALIZA registro existente
             registro.auth = auth
             registro.cnpj = cnpj
             registro.empresa = empresa
             db.session.commit()
             return jsonify({"mensagem": "Registro atualizado com sucesso", "dados": novo_registro}), 200
         else:
-            # CRIA novo registro
             novo = Auth(number=number, auth=auth, cnpj=cnpj, empresa=empresa, date=date_obj)
             db.session.add(novo)
             db.session.commit()
@@ -2096,13 +1906,11 @@ def desativar_auth():
 
         data_atual = datetime.now().date()
         
-        # Busca registro de hoje
         registro = Auth.query.filter_by(number=number, date=data_atual).first()
 
         if not registro:
             return jsonify({"mensagem": "dados nao encontrados"}), 201
         
-        # Altera apenas o campo auth
         registro.auth = 'false'
         db.session.commit()
         
@@ -2129,17 +1937,14 @@ def buscar_cliente_por_telefone():
         if not dados:
             return jsonify({"erro": "Corpo da requisição inválido"}), 400
 
-        # Pega e limpa o número recebido
         number = str(dados.get("number", "")).strip().replace(" ", "")
 
         if not number:
             return jsonify({"erro": "number é obrigatório"}), 400
 
-        # Busca na tabela auth pelo número (traz o registro mais recente)
         registro = Auth.query.filter_by(number=number).order_by(Auth.created_at.desc()).first()
 
         if registro and registro.cnpj and registro.empresa:
-            # Encontrou: Retorna CNPJ e EMPRESA
             return jsonify({
                 "cnpj": registro.cnpj,
                 "empresa": registro.empresa,
@@ -2147,7 +1952,6 @@ def buscar_cliente_por_telefone():
                 "mensagem": "Cliente encontrado"
             }), 200
 
-        # Não encontrou ou não tem CNPJ/EMPRESA cadastrado
         return jsonify({"mensagem": "dados nao encontrados"}), 201
 
     except Exception as e:
@@ -2379,7 +2183,6 @@ def consultar_bula():
         medicamento = None
         fonte_usada = 'local'
         
-        # PASSO 1: Buscar no banco local (cache)
         medicamento = BulaMedicamento.query.filter(
             db.or_(
                 BulaMedicamento.nome.ilike(f'%{busca}%'),
@@ -2392,11 +2195,9 @@ def consultar_bula():
             logger.info(f"Medicamento encontrado no cache local: {busca}")
             dados_retornados = f"Nome: {medicamento.nome} | Lab: {medicamento.laboratorio}"
         else:
-            # PASSO 2: Consultar PharmaDB (API externa)
             logger.info(f"Medicamento não encontrado no cache. Consultando PharmaDB: {busca}")
             fonte_usada = 'pharmadb'
             
-            # Obter token de autenticação
             token = get_pharmadb_token()
             if not token:
                 return jsonify({
@@ -2404,7 +2205,6 @@ def consultar_bula():
                     "sugestao": "Verifique se PHARMADB_API_KEY está configurada"
                 }), 503
             
-            # Mapeamento de nomes comerciais para busca
             mapeamento = {
                 'tylenol': 'paracetamol',
                 'dorflex': 'dorflex',
@@ -2417,7 +2217,6 @@ def consultar_bula():
             if busca.lower() in mapeamento:
                 termos_busca.append(mapeamento[busca.lower()])
             
-            # Headers com autenticação
             headers = {
                 'Authorization': f'Bearer {token}',
                 'Content-Type': 'application/json'
@@ -2426,10 +2225,8 @@ def consultar_bula():
             medicamento_encontrado = None
             termo_usado = None
             
-            # Tentar cada variação do nome
             for termo in termos_busca:
                 try:
-                    # Buscar bulas por nome
                     url = f"https://api.pharmadb.com.br/v1/bulas/busca?q={termo}&page=1&per_page=5"
                     response = requests.get(url, headers=headers, timeout=15)
                     
@@ -2438,11 +2235,9 @@ def consultar_bula():
                         items = data.get('items', [])
                         
                         if items and len(items) > 0:
-                            # Pega a primeira bula encontrada
                             bula_resumo = items[0]
                             bula_id = bula_resumo.get('id')
                             
-                            # Busca bula completa
                             url_completa = f"https://api.pharmadb.com.br/v1/bulas/{bula_id}"
                             response_completa = requests.get(url_completa, headers=headers, timeout=15)
                             
@@ -2479,10 +2274,8 @@ def consultar_bula():
                     "sugestao": "Tente buscar pelo nome genérico"
                 }), 404
             
-            # Extrair dados da bula
             produto = medicamento_encontrado.get('produto', {})
             
-            # PASSO 3: Salvar no cache local (bula_medicamento)
             try:
                 medicamento_cache = BulaMedicamento(
                     nome=produto.get('nome', '').upper(),
@@ -2503,7 +2296,6 @@ def consultar_bula():
                 db.session.commit()
                 logger.info(f"Medicamento salvo no cache local: {produto.get('nome')}")
                 
-                # Recarregar do banco
                 medicamento = BulaMedicamento.query.filter_by(nome=produto.get('nome', '').upper()).first()
                 
             except Exception as e:
@@ -2513,7 +2305,6 @@ def consultar_bula():
             
             dados_retornados = f"Nome: {produto.get('nome', '')} | Lab: {produto.get('laboratorio', '')}"
         
-        # PREPARAR RESPOSTA
         if medicamento:
             resposta_dados = medicamento.to_dict()
         else:
@@ -2538,7 +2329,6 @@ def consultar_bula():
             "dados": resposta_dados
         }), 200
         
-        # SALVAR LOG DA CONSULTA
         if telefone:
             try:
                 log = ConsultaBula(
@@ -2668,7 +2458,6 @@ def limpar_cache_bulas():
 # INICIALIZAÇÃO DO BANCO DE DADOS
 # =============================================================================
 
-# Criar tabelas se não existirem (com tratamento de erro)
 try:
     with app.app_context():
         print("Iniciando conexão com o banco...")
@@ -2686,7 +2475,6 @@ except Exception as e:
 # INICIALIZAÇÃO DO SERVIDOR
 # =============================================================================
 
-# Rota simples para testar se a app está rodando
 @app.route('/health', methods=['GET'])
 def health_check():
     try:        
