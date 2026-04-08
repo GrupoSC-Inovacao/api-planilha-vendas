@@ -35,13 +35,13 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # =============================================================================
-# CONFIGURAÇÃO RESILIENTE DO BANCO DE DADOS (psycopg v3 + Python 3.14)
+# CONFIGURAÇÃO RESILIENTE DO BANCO DE DADOS (psycopg2-binary + Python 3.11)
 # =============================================================================
 
 def create_resilient_engine(database_url, max_retries=5, retry_delay=2):
     """
     Cria engine do SQLAlchemy com configurações resilientes para Neon.
-    Compatível com psycopg (v3) e Python 3.14.
+    Compatível com psycopg2-binary e Python 3.11.
     """
     for attempt in range(max_retries):
         try:
@@ -58,9 +58,11 @@ def create_resilient_engine(database_url, max_retries=5, retry_delay=2):
                 connect_args={
                     'connect_timeout': 10,
                     'sslmode': 'require',
-                    # psycopg3: keepalives são gerenciados internamente
-                    # options permite passar parâmetros extras via libpq
-                    'options': '-c statement_timeout=30000'  # 30s timeout para queries
+                    # psycopg2 via libpq: keepalives mantêm conexão ativa contra idle timeout
+                    'keepalives': 1,
+                    'keepalives_idle': 30,      # Inicia keepalive após 30s idle
+                    'keepalives_interval': 10,  # Envia ping a cada 10s
+                    'keepalives_count': 5       # Tenta 5 vezes antes de dar erro
                 },
                 echo=False
             )
@@ -96,15 +98,20 @@ def create_resilient_engine(database_url, max_retries=5, retry_delay=2):
 
 database_url = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
 
-# Converte postgres:// (legado) para postgresql://
+# Converte postgres:// (legado Render/Heroku) para postgresql://
 if database_url and database_url.startswith('postgres://'):
     database_url = database_url.replace('postgres://', 'postgresql://', 1)
 
-# Garante que usa o driver psycopg (v3) - compatível com Python 3.14
-if database_url.startswith('postgresql://') and '+psycopg' not in database_url:
-    database_url = database_url.replace('postgresql://', 'postgresql+psycopg://', 1)
+# Garante que usa o driver psycopg2 (compatível com psycopg2-binary + Python 3.11)
+# IMPORTANTE: Deve ser +psycopg2 (v2), NÃO +psycopg (v3)
+if database_url.startswith('postgresql://'):
+    if '+psycopg2' not in database_url and '+psycopg' not in database_url:
+        database_url = database_url.replace('postgresql://', 'postgresql+psycopg2://', 1)
+    # Se estiver usando psycopg (v3), converte para psycopg2 para compatibilidade
+    elif '+psycopg://' in database_url:
+        database_url = database_url.replace('postgresql+psycopg://', 'postgresql+psycopg2://', 1)
 
-logger.info(f"🔗 Database URL configurada: {'postgresql+psycopg://***' if 'postgresql' in database_url else database_url}")
+logger.info(f"🔗 Database URL configurada: {'postgresql+psycopg2://***' if 'postgresql' in database_url else database_url}")
 
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
