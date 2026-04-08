@@ -35,13 +35,13 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # =============================================================================
-# CONFIGURAÇÃO RESILIENTE DO BANCO DE DADOS
+# CONFIGURAÇÃO RESILIENTE DO BANCO DE DADOS (psycopg2-binary)
 # =============================================================================
 
 def create_resilient_engine(database_url, max_retries=5, retry_delay=2):
     """
     Cria engine do SQLAlchemy com configurações resilientes para Neon.
-    Inclui retry automático e pool de conexões configurado.
+    Compatível com psycopg2-binary.
     """
     for attempt in range(max_retries):
         try:
@@ -58,13 +58,14 @@ def create_resilient_engine(database_url, max_retries=5, retry_delay=2):
                 connect_args={
                     'connect_timeout': 10,
                     'sslmode': 'require',
+                    # keepalives são suportados pelo psycopg2 via libpq
                     'keepalives': 1,
                     'keepalives_idle': 30,
                     'keepalives_interval': 10,
                     'keepalives_count': 5
                 },
-                echo=False,
-                future=True
+                echo=False
+                # Removido 'future=True' - não compatível com psycopg2
             )
             
             # Testa conexão
@@ -92,14 +93,21 @@ def create_resilient_engine(database_url, max_retries=5, retry_delay=2):
     
     raise Exception("Não foi possível conectar ao banco de dados")
 
-# Configura URL do banco
+# =============================================================================
+# CONFIGURAÇÃO DA URL DO BANCO
+# =============================================================================
+
 database_url = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
 
+# Converte postgres:// (legado) para postgresql://
 if database_url and database_url.startswith('postgres://'):
     database_url = database_url.replace('postgres://', 'postgresql://', 1)
 
-if database_url.startswith('postgresql://') and not database_url.startswith('postgresql+psycopg2://'):
+# Garante que usa o driver psycopg2 (compatível com psycopg2-binary)
+if database_url.startswith('postgresql://') and '+psycopg2' not in database_url:
     database_url = database_url.replace('postgresql://', 'postgresql+psycopg2://', 1)
+
+logger.info(f"🔗 Database URL configurada: {'postgresql+psycopg2://***' if 'postgresql' in database_url else database_url}")
 
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
@@ -109,17 +117,21 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'max_overflow': 10
 }
 
-# Cria engine resiliente
+# =============================================================================
+# INICIALIZAÇÃO DO ENGINE E SESSION
+# =============================================================================
+
+engine = None
+SessionLocal = None
+Base = None
+
 try:
     engine = create_resilient_engine(database_url)
     SessionLocal = scoped_session(sessionmaker(bind=engine))
     Base = declarative_base()
-    logger.info("✅ Engine do banco criada com sucesso!")
+    logger.info("✅ Engine e Session criados com sucesso!")
 except Exception as e:
     logger.error(f"❌ ERRO CRÍTICO AO INICIAR BANCO: {e}")
-    engine = None
-    SessionLocal = None
-    Base = None
     raise
 
 # Inicializa Flask-SQLAlchemy com o engine criado
