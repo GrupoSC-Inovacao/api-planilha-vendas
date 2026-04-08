@@ -43,7 +43,7 @@ app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 db = SQLAlchemy(app)
 
 # =============================================================================
-# MODELS - CLASSES QUE REPRESENTAM AS TABELAS DO BANCO
+# MODELS
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -122,7 +122,7 @@ class VendaItem(db.Model):
         }
 
 # -----------------------------------------------------------------------------
-# TABELA: carrinho_abandonado (itens adicionados mas venda não finalizada)
+# TABELA: carrinho_abandonado (itens adicionados, venda não finalizada)
 # -----------------------------------------------------------------------------
 class CarrinhoAbandonado(db.Model):
     __tablename__ = 'carrinho_abandonado'
@@ -165,7 +165,7 @@ class CarrinhoAbandonado(db.Model):
         }
 
 # -----------------------------------------------------------------------------
-# TABELA: cotacoes (cabeçalho da cotação)
+# TABELA: cotacoes
 # -----------------------------------------------------------------------------
 class Cotacao(db.Model):
     __tablename__ = 'cotacoes'
@@ -508,7 +508,7 @@ class ConsultaBula(db.Model):
         }
 
 # -----------------------------------------------------------------------------
-# TABELA: bula_medicamento (cache local de bulas consultadas)
+# TABELA: bula_medicamento (dados local de bulas consultadas)
 # -----------------------------------------------------------------------------
 class BulaMedicamento(db.Model):
     __tablename__ = 'bula_medicamento'
@@ -560,7 +560,7 @@ class BulaMedicamento(db.Model):
         }
 
 # -----------------------------------------------------------------------------
-# FUNÇÕES AUXILIARES - PHARMADB AUTH
+# FUNÇÕES AUXILIARES - PHARMADB AUTH (Consulta externa de bulas)
 # -----------------------------------------------------------------------------
 def get_pharmadb_token():
     """
@@ -708,7 +708,7 @@ def salvar_venda():
         return jsonify({"erro": "Falha ao salvar venda"}), 500
 
 # -----------------------------------------------------------------------------
-# POST /carrinho - ADICIONAR/ACUMULAR ITENS NO CARRINHO ABANDONADO
+# POST /carrinho - ADICIONAR ITENS NO CARRINHO ABANDONADO
 # -----------------------------------------------------------------------------
 @app.route('/carrinho', methods=['POST'])
 def adicionar_ao_carrinho():
@@ -864,7 +864,7 @@ def buscar_carrinho_abandonado(telefone):
         return jsonify({"erro": "Falha ao buscar carrinho"}), 500
 
 # -----------------------------------------------------------------------------
-# POST /carrinho/remover - REMOVER/SUBTRAIR ITENS DO CARRINHO
+# POST /carrinho/remover - REMOVER ITENS DO CARRINHO
 # -----------------------------------------------------------------------------
 @app.route('/carrinho/remover', methods=['POST'])
 def remover_do_carrinho():
@@ -1779,7 +1779,7 @@ def listar_imagens_por_nome(nome):
     return jsonify({"imagens": arquivos_encontrados})
 
 # -----------------------------------------------------------------------------
-# GET /imagens-arquivo/<nome> - SERVIR ARQUIVO DE IMAGEM
+# GET /imagens-arquivo/<nome> - MOSTRAR ARQUIVO DE IMAGEM
 # -----------------------------------------------------------------------------
 @app.route('/imagens-arquivo/<nome>')
 def servir_arquivo_imagem(nome):
@@ -1830,7 +1830,7 @@ def consultar_auth():
         return jsonify({"erro": "Falha ao consultar dados"}), 500
 
 # -----------------------------------------------------------------------------
-# POST /salvar - SALVAR/ATUALIZAR AUTENTICAÇÃO (UPSERT)
+# POST /salvar - SALVAR/ATUALIZAR AUTENTICAÇÃO
 # -----------------------------------------------------------------------------
 @app.route('/salvar', methods=['POST'])
 def salvar_auth():
@@ -1959,7 +1959,7 @@ def buscar_cliente_por_telefone():
         return jsonify({"erro": "Falha ao buscar cliente"}), 500
 
 # -----------------------------------------------------------------------------
-# POST /consultas-bula/log - SALVAR LOG DE CONSULTA DE BULA
+# POST /consultas-bula/log - SALVAR DADOS DE CONSULTA DE BULA
 # -----------------------------------------------------------------------------
 @app.route('/consultas-bula/log', methods=['POST'])
 def salvar_log_consulta_bula():
@@ -2025,7 +2025,7 @@ def salvar_log_consulta_bula():
         }), 500
 
 # -----------------------------------------------------------------------------
-# GET /consultas-bula - BUSCAR LOGS DE CONSULTAS
+# GET /consultas-bula - BUSCAR DAODS DE CONSULTAS DE BULA
 # -----------------------------------------------------------------------------
 @app.route('/consultas-bula', methods=['GET'])
 def buscar_logs_consultas_bula():
@@ -2090,7 +2090,7 @@ def buscar_logs_consultas_bula():
         }), 500
 
 # -----------------------------------------------------------------------------
-# DELETE /consultas-bula - EXCLUIR LOGS DE CONSULTAS
+# DELETE /consultas-bula - EXCLUIR DADOS DE CONSULTAS
 # -----------------------------------------------------------------------------
 @app.route('/consultas-bula', methods=['DELETE'])
 def excluir_logs_consultas_bula():
@@ -2151,7 +2151,7 @@ def excluir_logs_consultas_bula():
         }), 500
 
 # -----------------------------------------------------------------------------
-# POST /bula - CONSULTAR BULA COMPLETA (PHARMADB COM AUTH + CACHE LOCAL)
+# POST /bula - CONSULTAR BULA COMPLETA (PHARMADB COM AUTH + DADOS LOCAL)
 # -----------------------------------------------------------------------------
 @app.route('/bula', methods=['POST'])
 def consultar_bula():
@@ -2363,7 +2363,7 @@ def consultar_bula():
         }), 500
 
 # -----------------------------------------------------------------------------
-# GET /bulas - LISTAR MEDICAMENTOS NO CACHE LOCAL
+# GET /bulas - LISTAR BULAS DE MEDICAMENTOS NA BASE LOCAL
 # -----------------------------------------------------------------------------
 @app.route('/bulas', methods=['GET'])
 def listar_bulas_cache():
@@ -2401,7 +2401,7 @@ def listar_bulas_cache():
         return jsonify({"erro": str(e)}), 500
 
 # -----------------------------------------------------------------------------
-# DELETE /bulas - LIMPAR CACHE DE BULAS
+# DELETE /bulas
 # -----------------------------------------------------------------------------
 @app.route('/bulas', methods=['DELETE'])
 def limpar_cache_bulas():
