@@ -1,13 +1,5 @@
-# requirements.txt
-# Dependências da API de Vendas
-
 Flask==3.0.0
 Flask-SQLAlchemy==3.1.1
-
-# Driver PostgreSQL - versão compatível e estável
-# psycopg2-binary inclui os binários nativos, sem necessidade de compilar
-psycopg2-binary==2.9.9
-
-# Utilitários
+psycopg[binary]==3.1.18
 python-dotenv==1.0.0
 requests==2.33.1
