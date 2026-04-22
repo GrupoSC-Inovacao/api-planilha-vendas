@@ -3,25 +3,18 @@
 # =============================================================================
 from flask import Flask, jsonify, request, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.dialects.postgresql import psycopg
 from datetime import datetime, timedelta
 from decimal import Decimal
-from sqlalchemy import text, create_engine
-from sqlalchemy.orm import sessionmaker, scoped_session, declarative_base
-from sqlalchemy.exc import OperationalError, SQLAlchemyError
-from sqlalchemy.pool import QueuePool
+from sqlalchemy import text
 import os
 import logging
 import sys
 import requests
-import time
-from functools import wraps
-from contextlib import contextmanager
 
-# Variáveis globais para cache do token
 _pharmadb_token = None
 _pharmadb_token_expires_at = None
 
-# Configuração de logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -35,177 +28,19 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # =============================================================================
-# CONFIGURAÇÃO RESILIENTE DO BANCO DE DADOS (psycopg2-binary + Python 3.11)
+# CONFIGURAÇÃO DO BANCO DE DADOS
 # =============================================================================
-
-def create_resilient_engine(database_url, max_retries=5, retry_delay=2):
-    """
-    Cria engine do SQLAlchemy com configurações resilientes para Neon.
-    Compatível com psycopg2-binary e Python 3.11.
-    """
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"Tentativa {attempt + 1}/{max_retries} de conexão com o banco...")
-            
-            engine = create_engine(
-                database_url,
-                poolclass=QueuePool,
-                pool_size=5,
-                max_overflow=10,
-                pool_pre_ping=True,        # Verifica conexão antes de usar
-                pool_recycle=300,          # Recicla conexão a cada 5 min (antes do Neon dormir)
-                pool_timeout=30,           # Timeout para obter conexão do pool
-                connect_args={
-                    'connect_timeout': 10,
-                    'sslmode': 'require',
-                    # psycopg2 via libpq: keepalives mantêm conexão ativa contra idle timeout
-                    'keepalives': 1,
-                    'keepalives_idle': 30,      # Inicia keepalive após 30s idle
-                    'keepalives_interval': 10,  # Envia ping a cada 10s
-                    'keepalives_count': 5       # Tenta 5 vezes antes de dar erro
-                },
-                echo=False
-            )
-            
-            # Testa conexão
-            with engine.connect() as conn:
-                conn.execute(text('SELECT 1'))
-                logger.info("✅ Conexão com o banco estabelecida com sucesso!")
-            
-            return engine
-            
-        except OperationalError as e:
-            if attempt < max_retries - 1:
-                logger.warning(f"⚠️  Falha na conexão (tentativa {attempt + 1}): {e}")
-                logger.info(f"Aguardando {retry_delay}s antes de retry...")
-                time.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 30)  # Exponential backoff, max 30s
-            else:
-                logger.error(f"❌ Falha crítica ao conectar após {max_retries} tentativas: {e}")
-                raise
-        except Exception as e:
-            logger.error(f"❌ Erro inesperado ao criar engine: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-            else:
-                raise
-    
-    raise Exception("Não foi possível conectar ao banco de dados")
-
-# =============================================================================
-# CONFIGURAÇÃO DA URL DO BANCO
-# =============================================================================
-
 database_url = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
 
-# Converte postgres:// (legado Render/Heroku) para postgresql://
 if database_url and database_url.startswith('postgres://'):
     database_url = database_url.replace('postgres://', 'postgresql://', 1)
 
-# Garante que usa o driver psycopg2 (compatível com psycopg2-binary + Python 3.11)
-# IMPORTANTE: Deve ser +psycopg2 (v2), NÃO +psycopg (v3)
-if database_url.startswith('postgresql://'):
-    if '+psycopg2' not in database_url and '+psycopg' not in database_url:
-        database_url = database_url.replace('postgresql://', 'postgresql+psycopg2://', 1)
-    # Se estiver usando psycopg (v3), converte para psycopg2 para compatibilidade
-    elif '+psycopg://' in database_url:
-        database_url = database_url.replace('postgresql+psycopg://', 'postgresql+psycopg2://', 1)
-
-logger.info(f"🔗 Database URL configurada: {'postgresql+psycopg2://***' if 'postgresql' in database_url else database_url}")
+if database_url.startswith('postgresql://') and not database_url.startswith('postgresql+psycopg://'):
+    database_url = database_url.replace('postgresql://', 'postgresql+psycopg://', 1)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = database_url
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'pool_pre_ping': True,
-    'pool_recycle': 300,
-    'pool_timeout': 30,
-    'max_overflow': 10
-}
 
-# =============================================================================
-# INICIALIZAÇÃO DO ENGINE E SESSION
-# =============================================================================
-
-engine = None
-SessionLocal = None
-Base = None
-
-try:
-    engine = create_resilient_engine(database_url)
-    SessionLocal = scoped_session(sessionmaker(bind=engine))
-    Base = declarative_base()
-    logger.info("✅ Engine e Session criados com sucesso!")
-except Exception as e:
-    logger.error(f"❌ ERRO CRÍTICO AO INICIAR BANCO: {e}")
-    raise
-
-# Inicializa Flask-SQLAlchemy com o engine criado
-db = SQLAlchemy(app, engine=engine)
-
-# =============================================================================
-# DECORATOR DE RETRY PARA OPERAÇÕES DE BANCO
-# =============================================================================
-
-def db_retry(max_retries=3, delay=1):
-    """
-    Decorator para retry automático em operações de banco.
-    Lida com cold start do Neon e conexões caídas.
-    """
-    def decorator(f):
-        @wraps(f)
-        def wrapper(*args, **kwargs):
-            last_error = None
-            current_delay = delay
-            
-            for attempt in range(max_retries):
-                try:
-                    return f(*args, **kwargs)
-                except OperationalError as e:
-                    last_error = e
-                    logger.warning(f"⚠️  DB OperationalError (tentativa {attempt + 1}/{max_retries}): {e}")
-                    
-                    if attempt < max_retries - 1:
-                        logger.info(f"Aguardando {current_delay}s antes de retry...")
-                        time.sleep(current_delay)
-                        current_delay *= 2  # Exponential backoff
-                        
-                        # Tenta reconectar
-                        try:
-                            global engine, SessionLocal
-                            if engine:
-                                engine.dispose()  # Fecha todas as conexões
-                            engine = create_resilient_engine(database_url, max_retries=2)
-                            SessionLocal = scoped_session(sessionmaker(bind=engine))
-                            logger.info("✅ Reconexão bem-sucedida!")
-                        except Exception as reconnect_error:
-                            logger.error(f"❌ Falha na reconexão: {reconnect_error}")
-                    
-                except SQLAlchemyError as e:
-                    last_error = e
-                    logger.error(f"❌ SQLAlchemyError: {e}")
-                    if attempt < max_retries - 1:
-                        time.sleep(current_delay)
-            
-            logger.error(f"❌ Todas as {max_retries} tentativas falharam")
-            raise last_error
-        
-        return wrapper
-    return decorator
-
-# Context manager para sessões de banco
-@contextmanager
-def get_db_session():
-    """
-    Context manager para gerenciar sessões de banco com tratamento de erro.
-    """
-    session = SessionLocal()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+db = SQLAlchemy(app)
 
 # =============================================================================
 # MODELS
@@ -777,7 +612,6 @@ def get_pharmadb_token():
 # POST /vendas - SALVAR UMA NOVA VENDA
 # -----------------------------------------------------------------------------
 @app.route('/vendas', methods=['POST'])
-@db_retry(max_retries=3)
 def salvar_venda():
     """
     Salva uma nova venda com múltiplos itens.
@@ -877,7 +711,6 @@ def salvar_venda():
 # POST /carrinho - ADICIONAR ITENS NO CARRINHO ABANDONADO
 # -----------------------------------------------------------------------------
 @app.route('/carrinho', methods=['POST'])
-@db_retry(max_retries=3)
 def adicionar_ao_carrinho():
     """
     Adiciona ou acumula itens no carrinho abandonado.
@@ -999,7 +832,6 @@ def adicionar_ao_carrinho():
 # GET /carrinho/<telefone> - BUSCAR CARRINHO ABANDONADO DO CLIENTE
 # -----------------------------------------------------------------------------
 @app.route('/carrinho/<telefone>', methods=['GET'])
-@db_retry(max_retries=3)
 def buscar_carrinho_abandonado(telefone):
     """
     Retorna todos os itens do carrinho abandonado de um cliente pelo telefone.
@@ -1035,7 +867,6 @@ def buscar_carrinho_abandonado(telefone):
 # POST /carrinho/remover - REMOVER ITENS DO CARRINHO
 # -----------------------------------------------------------------------------
 @app.route('/carrinho/remover', methods=['POST'])
-@db_retry(max_retries=3)
 def remover_do_carrinho():
     """
     Remove ou subtrai itens do carrinho abandonado.
@@ -1170,7 +1001,6 @@ def remover_do_carrinho():
 # DELETE /carrinho/<telefone> - LIMPAR CARRINHO ABANDONADO
 # -----------------------------------------------------------------------------
 @app.route('/carrinho/<telefone>', methods=['DELETE'])
-@db_retry(max_retries=3)
 def limpar_carrinho_abandonado(telefone):
     """
     Remove todos os itens do carrinho abandonado de um cliente pelo telefone.
@@ -1206,7 +1036,6 @@ def limpar_carrinho_abandonado(telefone):
 # POST /cotacoes - SINCRONIZAR COTAÇÃO
 # -----------------------------------------------------------------------------
 @app.route('/cotacoes', methods=['POST'])
-@db_retry(max_retries=3)
 def sincronizar_cotacao():
     """
     Sincroniza uma cotação com o estado enviado.
@@ -1353,7 +1182,6 @@ def sincronizar_cotacao():
 # GET /cotacoes - BUSCAR COTAÇÃO POR TELEFONE E/OU CÓDIGO
 # -----------------------------------------------------------------------------
 @app.route('/cotacoes', methods=['GET'])
-@db_retry(max_retries=3)
 def buscar_cotacao():
     """
     Busca cotações filtrando por telefone e/ou código.
@@ -1435,7 +1263,6 @@ def buscar_cotacao():
 # DELETE /cotacoes - EXCLUIR COTAÇÃO POR TELEFONE E/OU CÓDIGO
 # -----------------------------------------------------------------------------
 @app.route('/cotacoes', methods=['DELETE'])
-@db_retry(max_retries=3)
 def excluir_cotacao():
     """
     Exclui cotações filtrando por telefone e/ou código.
@@ -1489,7 +1316,6 @@ def excluir_cotacao():
 # POST /ofertas - CADASTRAR NOVA OFERTA
 # -----------------------------------------------------------------------------
 @app.route('/ofertas', methods=['POST'])
-@db_retry(max_retries=3)
 def cadastrar_oferta():
     """
     Cadastra uma nova oferta promocional.
@@ -1597,7 +1423,6 @@ def cadastrar_oferta():
 # GET /ofertas - BUSCAR OFERTAS
 # -----------------------------------------------------------------------------
 @app.route('/ofertas', methods=['GET'])
-@db_retry(max_retries=3)
 def buscar_ofertas():
     """
     Busca ofertas filtrando por telefone, CNPJ e/ou DDD.
@@ -1703,7 +1528,6 @@ def buscar_ofertas():
 # DELETE /ofertas - EXCLUIR OFERTA POR NOME OU ID
 # -----------------------------------------------------------------------------
 @app.route('/ofertas', methods=['DELETE'])
-@db_retry(max_retries=3)
 def excluir_oferta():
     """
     Exclui uma oferta pelo nome ou ID.
@@ -1759,7 +1583,6 @@ def excluir_oferta():
 # GET /vendas/ultima/<cnpj> - BUSCAR ÚLTIMA VENDA DO CLIENTE
 # -----------------------------------------------------------------------------
 @app.route('/vendas/ultima/<cnpj>', methods=['GET'])
-@db_retry(max_retries=3)
 def buscar_ultima_venda(cnpj):
     """
     Retorna a venda mais recente de um cliente pelo CNPJ.
@@ -1785,7 +1608,6 @@ def buscar_ultima_venda(cnpj):
 # GET /vendas/cliente/<cnpj> - BUSCAR TODAS AS VENDAS DO CLIENTE
 # -----------------------------------------------------------------------------
 @app.route('/vendas/cliente/<cnpj>', methods=['GET'])
-@db_retry(max_retries=3)
 def buscar_todas_vendas_cliente(cnpj):
     """
     Retorna o histórico completo de vendas de um cliente.
@@ -1814,7 +1636,6 @@ def buscar_todas_vendas_cliente(cnpj):
 # GET /vendas/relatorio - RELATÓRIO DE VENDAS COM FILTROS
 # -----------------------------------------------------------------------------
 @app.route('/vendas/relatorio', methods=['GET'])
-@db_retry(max_retries=3)
 def relatorio_vendas():
     """
     Gera relatório de vendas com filtros opcionais por data e CNPJ.
@@ -1875,7 +1696,6 @@ def relatorio_vendas():
 # GET /catalogo - LISTAR TODOS OS PRODUTOS
 # -----------------------------------------------------------------------------
 @app.route('/catalogo', methods=['GET'])
-@db_retry(max_retries=3)
 def ler_produtos():
     """
     Retorna lista completa de produtos com ID (para usar na venda).
@@ -1896,7 +1716,6 @@ def ler_produtos():
 # POST /clientes - BUSCAR CLIENTE POR EMPRESA + CNPJ
 # -----------------------------------------------------------------------------
 @app.route('/clientes', methods=['POST'])
-@db_retry(max_retries=3)
 def buscar_cliente():
     """
     Busca um cliente específico usando EMPRESA e CNPJ.
@@ -1929,7 +1748,6 @@ def buscar_cliente():
 # GET /imagens/<nome> - LISTAR IMAGENS POR NOME
 # -----------------------------------------------------------------------------
 @app.route('/imagens/<nome>')
-@db_retry(max_retries=3)
 def listar_imagens_por_nome(nome):
     """
     Busca imagens na pasta local que começam com o nome informado.
@@ -1964,7 +1782,6 @@ def listar_imagens_por_nome(nome):
 # GET /imagens-arquivo/<nome> - MOSTRAR ARQUIVO DE IMAGEM
 # -----------------------------------------------------------------------------
 @app.route('/imagens-arquivo/<nome>')
-@db_retry(max_retries=3)
 def servir_arquivo_imagem(nome):
     """
     Serve o arquivo de imagem diretamente para o cliente.
@@ -1982,7 +1799,6 @@ def servir_arquivo_imagem(nome):
 # POST /consultar - CONSULTAR AUTENTICAÇÃO (DATA ATUAL)
 # -----------------------------------------------------------------------------
 @app.route('/consultar', methods=['POST'])
-@db_retry(max_retries=3)
 def consultar_auth():
     """
     Verifica se um número está autenticado HOJE.
@@ -2017,7 +1833,6 @@ def consultar_auth():
 # POST /salvar - SALVAR/ATUALIZAR AUTENTICAÇÃO
 # -----------------------------------------------------------------------------
 @app.route('/salvar', methods=['POST'])
-@db_retry(max_retries=3)
 def salvar_auth():
     """
     Salva nova autenticação ou atualiza existente (mesmo number + data).
@@ -2074,7 +1889,6 @@ def salvar_auth():
 # POST /desativar - DESATIVAR AUTENTICAÇÃO (auth = false)
 # -----------------------------------------------------------------------------
 @app.route('/desativar', methods=['POST'])
-@db_retry(max_retries=3)
 def desativar_auth():
     """
     Altera o campo auth para 'false' no registro de hoje.
@@ -2111,7 +1925,6 @@ def desativar_auth():
 # POST /dados/cliente - BUSCAR CLIENTE POR TELEFONE (NA TABELA AUTH)
 # -----------------------------------------------------------------------------
 @app.route('/dados/cliente', methods=['POST'])
-@db_retry(max_retries=3)
 def buscar_cliente_por_telefone():
     """
     Busca o CNPJ e EMPRESA de um cliente pelo número de telefone na tabela auth.
@@ -2149,7 +1962,6 @@ def buscar_cliente_por_telefone():
 # POST /consultas-bula/log - SALVAR DADOS DE CONSULTA DE BULA
 # -----------------------------------------------------------------------------
 @app.route('/consultas-bula/log', methods=['POST'])
-@db_retry(max_retries=3)
 def salvar_log_consulta_bula():
     """
     Salva o log de uma consulta de bula realizada por um usuário.
@@ -2216,7 +2028,6 @@ def salvar_log_consulta_bula():
 # GET /consultas-bula - BUSCAR DAODS DE CONSULTAS DE BULA
 # -----------------------------------------------------------------------------
 @app.route('/consultas-bula', methods=['GET'])
-@db_retry(max_retries=3)
 def buscar_logs_consultas_bula():
     """
     Busca logs de consultas de bula com filtros opcionais.
@@ -2282,7 +2093,6 @@ def buscar_logs_consultas_bula():
 # DELETE /consultas-bula - EXCLUIR DADOS DE CONSULTAS
 # -----------------------------------------------------------------------------
 @app.route('/consultas-bula', methods=['DELETE'])
-@db_retry(max_retries=3)
 def excluir_logs_consultas_bula():
     """
     Exclui logs de consultas com filtros.
@@ -2344,7 +2154,6 @@ def excluir_logs_consultas_bula():
 # POST /bula - CONSULTAR BULA COMPLETA (PHARMADB COM AUTH + DADOS LOCAL)
 # -----------------------------------------------------------------------------
 @app.route('/bula', methods=['POST'])
-@db_retry(max_retries=3)
 def consultar_bula():
     """
     Consulta a bula completa de um medicamento via PharmaDB.
@@ -2557,7 +2366,6 @@ def consultar_bula():
 # GET /bulas - LISTAR BULAS DE MEDICAMENTOS NA BASE LOCAL
 # -----------------------------------------------------------------------------
 @app.route('/bulas', methods=['GET'])
-@db_retry(max_retries=3)
 def listar_bulas_cache():
     """
     Lista medicamentos armazenados no cache local.
@@ -2596,7 +2404,6 @@ def listar_bulas_cache():
 # DELETE /bulas
 # -----------------------------------------------------------------------------
 @app.route('/bulas', methods=['DELETE'])
-@db_retry(max_retries=3)
 def limpar_cache_bulas():
     """
     Limpa medicamentos do cache local.
@@ -2648,116 +2455,43 @@ def limpar_cache_bulas():
         return jsonify({"erro": str(e)}), 500
 
 # =============================================================================
-# INICIALIZAÇÃO DO BANCO DE DADOS (RESILIENTE)
+# INICIALIZAÇÃO DO BANCO DE DADOS
 # =============================================================================
 
-def init_database():
-    """
-    Inicializa o banco com retry e tratamento de cold start do Neon.
-    """
-    try:
-        with app.app_context():
-            logger.info("🔄 Iniciando conexão com o banco...")
-            logger.info(f"DATABASE_URL: {'OK' if os.environ.get('DATABASE_URL') else 'NÃO CONFIGURADA'}")
-            
-            # Tenta criar tabelas com retry
-            for attempt in range(3):
-                try:
-                    db.create_all()
-                    logger.info("✅ Banco conectado e tabelas verificadas!")
-                    return True
-                except OperationalError as e:
-                    if attempt < 2:
-                        logger.warning(f"⚠️  Tentativa {attempt + 1} falhou: {e}")
-                        logger.info("Aguardando 2s para retry...")
-                        time.sleep(2)
-                        # Tenta reconectar
-                        if engine:
-                            engine.dispose()
-                    else:
-                        logger.error(f"❌ Falha crítica após 3 tentativas: {e}")
-                        raise
-            return True
-            
-    except Exception as e:
-        logger.error(f"❌ ERRO CRÍTICO: {e}")
-        logger.error(f"Tipo: {type(e).__name__}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-# Executa inicialização
-if not init_database():
-    logger.error("Falha ao inicializar banco. Encerrando...")
-    sys.exit(1)
-
-# =============================================================================
-# HEALTH CHECK RESILIENTE
-# =============================================================================
-
-@app.route('/health', methods=['GET', 'HEAD'])
-def health_check():
-    """
-    Health check que lida com cold start do Neon.
-    Suporta GET e HEAD (para UptimeRobot/monitores).
-    """
-    try:
-        # Tenta conectar com retry embutido
-        for attempt in range(3):
-            try:
-                result = db.session.execute(text('SELECT 1'))
-                result.scalar()  # Força execução
-                db.session.commit()
-                
-                return jsonify({
-                    "status": "ok",
-                    "database": "connected",
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "attempt": attempt + 1
-                }), 200
-                
-            except OperationalError as e:
-                if attempt < 2:
-                    logger.warning(f"⚠️  Health check falhou (tentativa {attempt + 1}): {e}")
-                    time.sleep(2)
-                    # Tenta reconectar
-                    try:
-                        if engine:
-                            engine.dispose()
-                        global SessionLocal
-                        engine_temp = create_resilient_engine(database_url, max_retries=2)
-                        SessionLocal = scoped_session(sessionmaker(bind=engine_temp))
-                        logger.info("✅ Reconexão no health check!")
-                    except Exception as reconnect_error:
-                        logger.error(f"❌ Falha na reconexão: {reconnect_error}")
-                else:
-                    raise
-        
-    except Exception as e:
-        logger.error(f"❌ Health check failed: {e}")
-        return jsonify({
-            "status": "error",
-            "database": "disconnected",
-            "message": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }), 503
+try:
+    with app.app_context():
+        print("Iniciando conexão com o banco...")
+        print(f"DATABASE_URL: {'OK' if os.environ.get('DATABASE_URL') else 'NÃO CONFIGURADA'}")
+        db.create_all()
+        print("Banco conectado!")
+except Exception as e:
+    print(f"ERRO CRÍTICO: {e}")
+    print(f"Tipo: {type(e).__name__}")
+    import traceback
+    traceback.print_exc()
+    raise
 
 # =============================================================================
 # INICIALIZAÇÃO DO SERVIDOR
 # =============================================================================
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    try:        
+        from sqlalchemy import text
+        db.session.execute(text('SELECT 1'))
+        db.session.commit()
+        return jsonify({
+            "status": "ok",
+            "database": "connected",
+            "timestamp": datetime.utcnow().isoformat()
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
-    
-    logger.info(f"🚀 Iniciando servidor na porta {port}")
-    logger.info(f"📊 Ambiente: {'Production' if os.environ.get('DATABASE_URL') else 'Development'}")
-    
-    # Debug: lista rotas registradas (opcional, remova em produção)
-    logger.info("\n📋 Rotas registradas:")
-    for rule in app.url_map.iter_rules():
-        if 'HEAD' not in rule.methods and 'OPTIONS' not in rule.methods:
-            logger.info(f"  {', '.join(rule.methods)} {rule.rule}")
-    
-    # Roda o servidor
-    # debug=False é OBRIGATÓRIO em produção (Render)
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port)
